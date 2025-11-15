@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: skyapp-backend
+    env: python
+    plan: starter
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: uvicorn server_supabase:app --host 0.0.0.0 --port $PORT
+    rootDir: backend
+    autoDeploy: true
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: FOUNDER_EMAIL
+        value: "skyapp@gmail.com"
+      - key: ALLOW_DEV_LOGIN
+        value: "0"
+      - key: ALLOWED_ORIGINS
+        value: "https://app.example.com,https://skyapp.vercel.app"

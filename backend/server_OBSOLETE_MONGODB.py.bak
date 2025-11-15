@@ -1,0 +1,2407 @@
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, UploadFile, File, Request, Form
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.responses import FileResponse, StreamingResponse
+from dotenv import load_dotenv
+from starlette.middleware.cors import CORSMiddleware
+from motor.motor_asyncio import AsyncIOMotorClient
+import os
+import logging
+from pathlib import Path
+from pydantic import BaseModel, Field
+from typing import List, Optional
+import uuid
+from datetime import datetime, timedelta
+import bcrypt
+import jwt
+from enum import Enum
+import tempfile
+import io
+import asyncio
+import aiofiles
+import shutil
+
+# ReportLab imports for PDF generation
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import inch, cm
+from reportlab.lib import colors
+from reportlab.pdfgen import canvas
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as ReportLabImage, PageBreak
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT, TA_JUSTIFY
+from PIL import Image as PILImage
+import qrcode
+import base64
+
+ROOT_DIR = Path(__file__).parent
+load_dotenv(ROOT_DIR / '.env')
+
+# MongoDB connection
+mongo_url = os.environ['MONGO_URL']
+client = AsyncIOMotorClient(mongo_url)
+db = client[os.environ['DB_NAME']]
+
+# Create uploads directory
+UPLOADS_DIR = Path(__file__).parent / "uploads"
+UPLOADS_DIR.mkdir(exist_ok=True)
+
+# Create the main app without a prefix
+app = FastAPI(title="SearchApp API", description="API pour l'application de recherche terrain")
+
+# Create a router with the /api prefix
+api_router = APIRouter(prefix="/api")
+
+# Security
+security = HTTPBearer()
+JWT_SECRET = "your-secret-key-change-in-production-searchapp"
+JWT_ALGORITHM = "HS256"
+
+# Enums
+class UserRole(str, Enum):
+    ADMIN = "ADMIN"
+    BUREAU = "BUREAU" 
+    TECHNICIEN = "TECHNICIEN"
+
+class SearchStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    SHARED = "SHARED"
+    SHARED_TO_BUREAU = "SHARED_TO_BUREAU"
+    PROCESSED = "PROCESSED"
+    ARCHIVED = "ARCHIVED"
+
+# Models
+class PhotoMetadata(BaseModel):
+    filename: str
+    original_name: str
+    path: str
+    number: int
+    content_type: str
+    size: int
+
+class Company(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    name: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class User(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    email: str
+    nom: str
+    prenom: str
+    role: UserRole
+    company_id: str
+    password_hash: str
+    actif: bool = True
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class Search(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str
+    company_id: str
+    location: str
+    description: str
+    observations: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    photos: Optional[List[PhotoMetadata]] = []
+    status: SearchStatus = SearchStatus.ACTIVE
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class Report(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    search_id: str
+    user_id: str
+    company_id: str
+    title: str
+    content: str
+    pdf_url: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class Client(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    company_id: str
+    nom: str
+    email: str
+    telephone: Optional[str] = None
+    adresse: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class Quote(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    company_id: str
+    client_id: str
+    title: str
+    description: str
+    amount: float
+    status: str = "DRAFT"
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class Worksite(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    title: str
+    client_id: Optional[str] = None
+    client_name: Optional[str] = ""
+    quote_id: Optional[str] = None
+    company_id: str
+    source: str = "MANUAL"  # QUOTE, MANUAL
+    status: str = "PLANNED"  # PLANNED, IN_PROGRESS, COMPLETED, CANCELLED
+    description: Optional[str] = ""
+    address: Optional[str] = ""
+    amount: Optional[float] = 0.0
+    quote_pdf_url: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+class Schedule(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    worksite_id: str
+    team_leader_id: str
+    collaborator_id: str
+    company_id: str
+    date: str  # Format: YYYY-MM-DD
+    time: str  # Format: HH:MM
+    shift: str  # day, night, morning, afternoon
+    hours: int
+    description: Optional[str] = ""
+    status: str = "scheduled"  # scheduled, in_progress, completed, cancelled
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+class TeamLeader(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    nom: str
+    prenom: str
+    email: Optional[str] = ""
+    telephone: Optional[str] = ""
+    specialite: str
+    couleur: str
+    company_id: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+class Collaborator(BaseModel):
+    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    nom: str
+    prenom: str
+    email: Optional[str] = ""
+    telephone: Optional[str] = ""
+    competences: str
+    team_leader_id: str
+    company_id: str
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+
+# Request/Response Models
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class RegisterRequest(BaseModel):
+    company_name: str
+    email: str
+    nom: str
+    prenom: str
+    password: str
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str
+    user: dict
+
+class SearchCreate(BaseModel):
+    location: str
+    description: str
+    observations: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    photos: Optional[List[str]] = []
+
+class ReportCreate(BaseModel):
+    search_id: str
+    title: str
+    content: str
+
+class ClientCreate(BaseModel):
+    nom: str
+    email: str
+    telephone: Optional[str] = None
+    adresse: Optional[str] = None
+
+class QuoteCreate(BaseModel):
+    client_id: str
+    title: str
+    description: str
+    amount: float
+
+# Material Management Models
+from enum import Enum
+
+class MaterialStatus(str, Enum):
+    AVAILABLE = "AVAILABLE"
+    IN_USE = "IN_USE"
+    MAINTENANCE = "MAINTENANCE"
+    DAMAGED = "DAMAGED"
+    LOST = "LOST"
+
+class MaterialCategory(str, Enum):
+    TOOL = "TOOL"                    # Outils (perceuse, visseuse, etc.)
+    SAFETY = "SAFETY"                # Équipement de sécurité
+    MEASUREMENT = "MEASUREMENT"      # Instruments de mesure
+    VEHICLE = "VEHICLE"             # Véhicules
+    EQUIPMENT = "EQUIPMENT"         # Équipement lourd
+    CONSUMABLE = "CONSUMABLE"       # Consommables
+
+class MaterialCreate(BaseModel):
+    name: str = Field(..., max_length=200)
+    description: Optional[str] = None
+    category: MaterialCategory
+    brand: Optional[str] = None
+    model: Optional[str] = None
+    serial_number: Optional[str] = None
+    purchase_date: Optional[str] = None
+    purchase_price: Optional[float] = None
+    location: Optional[str] = None
+
+class MaterialAssign(BaseModel):
+    qr_code: str
+    notes: Optional[str] = None
+
+# Auth Functions
+def clean_mongo_doc(doc):
+    """Remove MongoDB ObjectId from document"""
+    if doc:
+        return {k: v for k, v in doc.items() if k != "_id"}
+    return None
+
+def clean_mongo_docs(docs):
+    """Remove MongoDB ObjectId from list of documents"""
+    return [clean_mongo_doc(doc) for doc in docs]
+
+def hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
+
+def verify_password(password: str, hashed: str) -> bool:
+    return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+
+def create_access_token(data: dict):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(days=7)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    return encoded_jwt
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = payload.get("sub")
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Token invalide")
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Token invalide")
+    
+    user_doc = await db.users.find_one({"id": user_id})
+    if user_doc is None:
+        raise HTTPException(status_code=401, detail="Utilisateur non trouvé")
+    
+    # Remove ObjectId before creating User model
+    user_data = clean_mongo_doc(user_doc)
+    return User(**user_data)
+
+async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """Verify JWT token and return token payload as dictionary"""
+    try:
+        payload = jwt.decode(credentials.credentials, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        user_id = payload.get("sub")
+        if user_id is None:
+            raise HTTPException(status_code=401, detail="Token invalide")
+            
+        # Get user info
+        user_doc = await db.users.find_one({"id": user_id})
+        if user_doc is None:
+            raise HTTPException(status_code=401, detail="Utilisateur non trouvé")
+        
+        # Return token payload with user info
+        return {
+            "user_id": user_id,
+            "company": user_doc.get("company_id"),
+            "role": user_doc.get("role"),
+            "email": user_doc.get("email")
+        }
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Token invalide")
+
+# Auth Routes
+@api_router.get("/")
+async def root():
+    return {"message": "SearchApp API fonctionne correctement"}
+
+@api_router.post("/auth/register", response_model=LoginResponse)
+async def register(register_data: RegisterRequest):
+    # Vérifier si l'email existe déjà
+    existing_user = await db.users.find_one({"email": register_data.email})
+    if existing_user:
+        raise HTTPException(status_code=400, detail="Email déjà utilisé")
+    
+    # Créer l'entreprise
+    company = Company(name=register_data.company_name)
+    company_dict = company.dict()
+    company_dict.pop('_id', None)
+    await db.companies.insert_one(company_dict)
+    
+    # Créer l'utilisateur admin
+    user = User(
+        email=register_data.email,
+        nom=register_data.nom,
+        prenom=register_data.prenom,
+        role=UserRole.BUREAU,  # Premier utilisateur = Bureau/Admin
+        company_id=company.id,
+        password_hash=hash_password(register_data.password)
+    )
+    
+    user_dict = user.dict()
+    user_dict.pop('_id', None)
+    await db.users.insert_one(user_dict)
+    
+    # Créer le token d'accès
+    access_token = create_access_token(data={"sub": user.id})
+    
+    # Nettoyer les données utilisateur pour la réponse
+    user_data = {k: v for k, v in user.dict().items() if k != "password_hash"}
+    
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": user_data
+    }
+
+@api_router.post("/auth/login", response_model=LoginResponse)
+async def login(login_data: LoginRequest):
+    user_doc = await db.users.find_one({"email": login_data.email})
+    if not user_doc or not verify_password(login_data.password, user_doc["password_hash"]):
+        raise HTTPException(status_code=401, detail="Email ou mot de passe incorrect")
+    
+    if not user_doc["actif"]:
+        raise HTTPException(status_code=401, detail="Compte désactivé")
+    
+    access_token = create_access_token(data={"sub": user_doc["id"]})
+    
+    # Remove ObjectId and clean user data
+    user_data = clean_mongo_doc(user_doc)
+    user_data.pop('password_hash', None)
+    
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "user": user_data
+    }
+
+@api_router.get("/auth/me")
+async def get_me(current_user: User = Depends(get_current_user)):
+    return clean_mongo_doc(current_user.dict())
+
+# Search Routes
+@api_router.post("/searches", response_model=Search)
+async def create_search(
+    location: str = Form(...),
+    description: str = Form(...),
+    observations: str = Form(""),
+    latitude: float = Form(None),  # Made optional
+    longitude: float = Form(None),  # Made optional
+    photos: List[UploadFile] = File(None),
+    photo_numbers: List[int] = Form(None),
+    current_user: User = Depends(get_current_user)
+):
+    """Create a new search with optional photo uploads"""
+    
+    # Generate search ID first
+    search_id = str(uuid.uuid4())
+    
+    # Handle photo uploads
+    uploaded_photos = []
+    if photos:
+        for i, photo in enumerate(photos):
+            if photo and photo.filename:
+                # Generate unique filename
+                file_extension = photo.filename.split('.')[-1] if '.' in photo.filename else 'jpg'
+                unique_filename = f"{uuid.uuid4()}.{file_extension}"
+                
+                # Create search-specific directory
+                search_uploads_dir = UPLOADS_DIR / search_id
+                search_uploads_dir.mkdir(exist_ok=True)
+                
+                # Save file
+                file_path = search_uploads_dir / unique_filename
+                async with aiofiles.open(file_path, 'wb') as buffer:
+                    content = await photo.read()
+                    await buffer.write(content)
+                
+                # Get photo number (default to index + 1 if not provided)
+                photo_number = photo_numbers[i] if photo_numbers and i < len(photo_numbers) else i + 1
+                
+                uploaded_photos.append(PhotoMetadata(
+                    filename=unique_filename,
+                    original_name=photo.filename,
+                    path=str(file_path),
+                    number=photo_number,
+                    content_type=photo.content_type or "image/jpeg",
+                    size=len(content)
+                ))
+    
+    # Use default coordinates if not provided (Paris coordinates)
+    default_lat = 48.8566  # Paris latitude
+    default_lng = 2.3522   # Paris longitude
+    
+    # Create search object
+    search = Search(
+        id=search_id,
+        location=location,
+        description=description,
+        observations=observations,
+        latitude=latitude if latitude is not None else default_lat,
+        longitude=longitude if longitude is not None else default_lng,
+        photos=uploaded_photos,
+        user_id=current_user.id,
+        company_id=current_user.company_id
+    )
+    
+    search_dict = search.dict()
+    search_dict.pop('_id', None)
+    await db.searches.insert_one(search_dict)
+    return search
+
+@api_router.get("/searches/{search_id}/photos/{filename}")
+async def get_photo(
+    search_id: str,
+    filename: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Serve uploaded photos"""
+    file_path = UPLOADS_DIR / search_id / filename
+    
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Photo non trouvée")
+    
+    return FileResponse(file_path)
+
+@api_router.get("/searches", response_model=List[Search])
+async def get_searches(current_user: User = Depends(get_current_user)):
+    searches = await db.searches.find({
+        "user_id": current_user.id,
+        "company_id": current_user.company_id
+    }).sort("created_at", -1).to_list(1000)
+    
+    # Handle legacy searches with string photos and new searches with PhotoMetadata
+    processed_searches = []
+    for search in searches:
+        search_data = clean_mongo_doc(search)
+        
+        # Convert legacy string photos to empty PhotoMetadata list
+        if 'photos' in search_data and search_data['photos']:
+            if isinstance(search_data['photos'][0], str):
+                # Legacy format - convert to empty list for now
+                search_data['photos'] = []
+        
+        processed_searches.append(Search(**search_data))
+    
+    return processed_searches
+
+@api_router.get("/searches/{search_id}", response_model=Search)
+async def get_search(search_id: str, current_user: User = Depends(get_current_user)):
+    """Get a specific search by ID"""
+    search = await db.searches.find_one({
+        "id": search_id,
+        "company_id": current_user.company_id
+    })
+    
+    if not search:
+        raise HTTPException(status_code=404, detail="Recherche non trouvée")
+    
+    return Search(**clean_mongo_doc(search))
+
+# Update search endpoint
+@api_router.put("/searches/{search_id}", response_model=Search)
+async def update_search(
+    search_id: str,
+    search_update: SearchCreate,
+    current_user: User = Depends(get_current_user)
+):
+    """Update a search"""
+    try:
+        # Check if search exists and belongs to user
+        existing_search = await db.searches.find_one({
+            "id": search_id,
+            "company_id": current_user.company_id,
+            "user_id": current_user.id
+        })
+        
+        if not existing_search:
+            raise HTTPException(status_code=404, detail="Recherche non trouvée ou non autorisée")
+        
+        # Update search data
+        update_data = search_update.dict(exclude_unset=True)
+        update_data["updated_at"] = datetime.utcnow().isoformat()
+        
+        result = await db.searches.update_one(
+            {
+                "id": search_id,
+                "company_id": current_user.company_id,
+                "user_id": current_user.id
+            },
+            {"$set": update_data}
+        )
+        
+        if result.modified_count == 0:
+            raise HTTPException(status_code=404, detail="Échec de la mise à jour")
+        
+        # Return updated search
+        updated_search = await db.searches.find_one({
+            "id": search_id,
+            "company_id": current_user.company_id
+        })
+        
+        return Search(**clean_mongo_doc(updated_search))
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors de la mise à jour de la recherche: {str(e)}"
+        )
+
+# Update search status endpoint (corrected)
+@api_router.put("/searches/{search_id}/status")
+async def update_search_status(
+    search_id: str,
+    request: Request,
+    current_user: User = Depends(get_current_user)
+):
+    """Update search status"""
+    try:
+        # Read the request body as text
+        body = await request.body()
+        status = body.decode('utf-8')
+        
+        # Validate status
+        valid_statuses = ['ACTIVE', 'SHARED', 'SHARED_TO_BUREAU', 'PROCESSED', 'ARCHIVED']
+        if status not in valid_statuses:
+            raise HTTPException(status_code=400, detail="Invalid status")
+        
+        # Update search
+        result = await db.searches.update_one(
+            {
+                "id": search_id,
+                "company_id": current_user.company_id,
+                "user_id": current_user.id
+            },
+            {
+                "$set": {
+                    "status": status,
+                    "updated_at": datetime.utcnow().isoformat()
+                }
+            }
+        )
+        
+        if result.modified_count == 0:
+            raise HTTPException(status_code=404, detail="Recherche non trouvée ou non autorisée")
+        
+        return {"message": "Statut mis à jour avec succès"}
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors de la mise à jour du statut: {str(e)}"
+        )
+@api_router.post("/reports", response_model=Report)
+async def create_report(report_data: ReportCreate, current_user: User = Depends(get_current_user)):
+    # Vérifier que la recherche existe
+    search = await db.searches.find_one({
+        "id": report_data.search_id,
+        "company_id": current_user.company_id
+    })
+    
+    if not search:
+        raise HTTPException(status_code=404, detail="Recherche non trouvée")
+    
+    report = Report(
+        **report_data.dict(),
+        user_id=current_user.id,
+        company_id=current_user.company_id
+    )
+    
+    report_dict = report.dict()
+    report_dict.pop('_id', None)
+    await db.reports.insert_one(report_dict)
+    return report
+
+@api_router.get("/reports", response_model=List[Report])
+async def get_reports(current_user: User = Depends(get_current_user)):
+    reports = await db.reports.find({
+        "company_id": current_user.company_id
+    }).sort("created_at", -1).to_list(1000)
+    
+    return [Report(**clean_mongo_doc(report)) for report in reports]
+
+# Client Routes
+@api_router.post("/clients", response_model=Client)
+async def create_client(client_data: ClientCreate, current_user: User = Depends(get_current_user)):
+    client = Client(**client_data.dict(), company_id=current_user.company_id)
+    client_dict = client.dict()
+    client_dict.pop('_id', None)
+    await db.clients.insert_one(client_dict)
+    return client
+
+@api_router.get("/clients", response_model=List[Client])
+async def get_clients(current_user: User = Depends(get_current_user)):
+    clients = await db.clients.find({"company_id": current_user.company_id}).to_list(1000)
+    
+    # Handle legacy records that might be missing required fields
+    valid_clients = []
+    for client in clients:
+        try:
+            client_data = clean_mongo_doc(client)
+            # Ensure required fields exist
+            if 'email' not in client_data:
+                client_data['email'] = 'legacy@client.com'
+            valid_clients.append(Client(**client_data))
+        except Exception as e:
+            print(f"Error processing client {client.get('id', 'unknown')}: {str(e)}")
+            continue
+    
+    return valid_clients
+
+# Quote Routes
+@api_router.post("/quotes", response_model=Quote)
+async def create_quote(quote_data: QuoteCreate, current_user: User = Depends(get_current_user)):
+    quote = Quote(**quote_data.dict(), company_id=current_user.company_id)
+    quote_dict = quote.dict()
+    quote_dict.pop('_id', None)
+    await db.quotes.insert_one(quote_dict)
+    return quote
+
+@api_router.get("/quotes", response_model=List[Quote])
+async def get_quotes(current_user: User = Depends(get_current_user)):
+    quotes = await db.quotes.find({"company_id": current_user.company_id}).to_list(1000)
+    return [Quote(**clean_mongo_doc(quote)) for quote in quotes]
+
+# Statistics Routes
+@api_router.get("/stats/dashboard")
+async def get_dashboard_stats(current_user: User = Depends(get_current_user)):
+    # Count documents
+    searches_count = await db.searches.count_documents({"company_id": current_user.company_id})
+    reports_count = await db.reports.count_documents({"company_id": current_user.company_id})
+    clients_count = await db.clients.count_documents({"company_id": current_user.company_id})
+    quotes_count = await db.quotes.count_documents({"company_id": current_user.company_id})
+    users_count = await db.users.count_documents({"company_id": current_user.company_id})
+    
+    # Count total companies in the system (global stat)
+    companies_count = len(await db.users.distinct("company_id"))
+    
+    # Recent searches
+    recent_searches = await db.searches.find({
+        "company_id": current_user.company_id
+    }).sort("created_at", -1).limit(5).to_list(5)
+    
+    return {
+        "total_searches": searches_count,
+        "total_reports": reports_count,
+        "total_clients": clients_count,
+        "total_quotes": quotes_count,
+        "total_users": users_count,
+        "total_companies": companies_count,
+        "recent_searches": [clean_mongo_doc(search) for search in recent_searches]
+    }
+
+# PDF Generation Classes and Functions
+class ProfessionalPDFReportGenerator:
+    def __init__(self):
+        self.temp_dir = "/tmp/reports"
+        os.makedirs(self.temp_dir, exist_ok=True)
+        
+        # Professional color scheme
+        self.colors = {
+            'primary': colors.Color(0.2, 0.4, 0.8),      # Blue
+            'secondary': colors.Color(0.1, 0.1, 0.1),    # Black
+            'accent': colors.Color(0.95, 0.95, 0.95),    # Light gray
+            'white': colors.Color(1, 1, 1),
+            'text': colors.Color(0.2, 0.2, 0.2),
+            'light_blue': colors.Color(0.9, 0.95, 1)
+        }
+        
+        # Professional styles
+        self.styles = getSampleStyleSheet()
+        
+        # Custom title style
+        self.styles.add(ParagraphStyle(
+            name='CustomTitle',
+            parent=self.styles['Heading1'],
+            fontSize=28,
+            spaceAfter=30,
+            textColor=self.colors['primary'],
+            alignment=TA_CENTER,
+            fontName='Helvetica-Bold'
+        ))
+        
+        # Custom subtitle style
+        self.styles.add(ParagraphStyle(
+            name='CustomSubtitle',
+            parent=self.styles['Heading2'],
+            fontSize=16,
+            spaceAfter=15,
+            textColor=self.colors['secondary'],
+            fontName='Helvetica-Bold'
+        ))
+        
+        # Professional body text
+        self.styles.add(ParagraphStyle(
+            name='ProfessionalBody',
+            parent=self.styles['Normal'],
+            fontSize=11,
+            spaceAfter=12,
+            textColor=self.colors['text'],
+            fontName='Helvetica',
+            leading=14
+        ))
+        
+        # Photo caption style
+        self.styles.add(ParagraphStyle(
+            name='PhotoCaption',
+            parent=self.styles['Normal'],
+            fontSize=10,
+            textColor=self.colors['primary'],
+            fontName='Helvetica-Bold',
+            alignment=TA_CENTER,
+            spaceAfter=15
+        ))
+        
+        # Header/Footer style
+        self.styles.add(ParagraphStyle(
+            name='HeaderFooter',
+            parent=self.styles['Normal'],
+            fontSize=9,
+            textColor=self.colors['text'],
+            fontName='Helvetica'
+        ))
+
+    def create_professional_header_footer(self, canvas, doc):
+        """Create professional header and footer"""
+        canvas.saveState()
+        
+        # Header
+        canvas.setFillColor(self.colors['primary'])
+        canvas.rect(0, doc.height + 40, doc.width + 80, 40, fill=1)
+        
+        canvas.setFillColor(self.colors['white'])
+        canvas.setFont('Helvetica-Bold', 16)
+        canvas.drawString(50, doc.height + 55, "SKYAPP - RAPPORT DE RECHERCHE TERRAIN")
+        
+        # Logo placeholder
+        canvas.setFillColor(self.colors['white'])
+        canvas.circle(doc.width + 20, doc.height + 60, 15, fill=1)
+        canvas.setFillColor(self.colors['primary'])
+        canvas.setFont('Helvetica-Bold', 12)
+        # Use drawString with manual centering instead of drawCentredText
+        text_width = canvas.stringWidth("S", 'Helvetica-Bold', 12)
+        canvas.drawString(doc.width + 20 - text_width/2, doc.height + 56, "S")
+        
+        # Footer
+        canvas.setFillColor(self.colors['accent'])
+        canvas.rect(0, 0, doc.width + 80, 30, fill=1)
+        
+        canvas.setFillColor(self.colors['text'])
+        canvas.setFont('Helvetica', 9)
+        canvas.drawString(50, 10, f"Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}")
+        canvas.drawRightString(doc.width + 30, 10, f"Page {doc.page}")
+        
+        canvas.restoreState()
+
+    async def process_professional_images(self, images: List[UploadFile]) -> List[dict]:
+        """Process images with professional numbering and validation"""
+        processed_images = []
+        
+        for i, image in enumerate(images, 1):
+            try:
+                # Read image content
+                content = await image.read()
+                await image.seek(0)
+                
+                # Create temporary file
+                temp_filename = f"img_{i}_{uuid.uuid4().hex}_{image.filename}"
+                temp_path = os.path.join(self.temp_dir, temp_filename)
+                
+                async with aiofiles.open(temp_path, 'wb') as f:
+                    await f.write(content)
+                
+                # Validate and process image
+                try:
+                    with PILImage.open(temp_path) as img:
+                        # Get image info
+                        width, height = img.size
+                        format_type = img.format
+                        
+                        # Resize if too large (max 800px width)
+                        if width > 800:
+                            ratio = 800 / width
+                            new_height = int(height * ratio)
+                            img = img.resize((800, new_height), PILImage.Resampling.LANCZOS)
+                            
+                            # Save resized image
+                            resized_path = temp_path.replace('.', '_resized.')
+                            img.save(resized_path, quality=85, optimize=True)
+                            os.remove(temp_path)
+                            temp_path = resized_path
+                        
+                        processed_images.append({
+                            'path': temp_path,
+                            'filename': image.filename,
+                            'number': i,
+                            'size': f"{img.size[0]}x{img.size[1]}",
+                            'format': format_type,
+                            'caption': f"Photo n°{i:02d} - {image.filename}"
+                        })
+                        
+                except Exception as e:
+                    print(f"Error processing image {image.filename}: {str(e)}")
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                    continue
+                    
+            except Exception as e:
+                print(f"Error reading image {image.filename}: {str(e)}")
+                continue
+        
+        return processed_images
+
+    def generate_professional_search_report(self, search_data: dict, user_data: dict, images: List[dict] = None) -> io.BytesIO:
+        """Generate a professional search report with numbered photos"""
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(
+            buffer,
+            pagesize=A4,
+            rightMargin=50,
+            leftMargin=50,
+            topMargin=80,
+            bottomMargin=50
+        )
+        
+        story = []
+        
+        # Title page
+        story.append(Spacer(1, 100))
+        
+        # Main title with professional styling
+        title = f"RAPPORT DE RECHERCHE TERRAIN"
+        story.append(Paragraph(title, self.styles['CustomTitle']))
+        story.append(Spacer(1, 40))
+        
+        # Location as subtitle
+        location = search_data.get('location', 'Localisation non spécifiée')
+        story.append(Paragraph(f"<b>Site :</b> {location}", self.styles['CustomSubtitle']))
+        story.append(Spacer(1, 60))
+        
+        # Professional info box
+        info_data = [
+            ['Référence', search_data.get('id', 'N/A')[:8].upper()],
+            ['Technicien', f"{user_data.get('prenom', '')} {user_data.get('nom', '')}"],
+            ['Date d\'intervention', self._format_date(search_data.get('created_at'))],
+            ['Coordonnées GPS', self._format_coordinates(search_data.get('latitude'), search_data.get('longitude'))],
+            ['Statut', search_data.get('status', 'ACTIVE')],
+        ]
+        
+        info_table = Table(info_data, colWidths=[3*inch, 3*inch])
+        info_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (0, -1), self.colors['light_blue']),
+            ('TEXTCOLOR', (0, 0), (-1, -1), self.colors['text']),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+            ('FONTNAME', (1, 0), (1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 0), (-1, -1), 11),
+            ('GRID', (0, 0), (-1, -1), 1, self.colors['primary']),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('ROWBACKGROUNDS', (0, 0), (-1, -1), [self.colors['white'], self.colors['accent']]),
+        ]))
+        
+        story.append(info_table)
+        story.append(PageBreak())
+        
+        # Description section
+        story.append(Paragraph("1. DESCRIPTION DE L'INTERVENTION", self.styles['CustomSubtitle']))
+        story.append(Spacer(1, 15))
+        
+        description = search_data.get('description', 'Aucune description fournie')
+        story.append(Paragraph(description, self.styles['ProfessionalBody']))
+        story.append(Spacer(1, 25))
+        
+        # Observations section
+        if search_data.get('observations'):
+            story.append(Paragraph("2. OBSERVATIONS TECHNIQUES", self.styles['CustomSubtitle']))
+            story.append(Spacer(1, 15))
+            story.append(Paragraph(search_data['observations'], self.styles['ProfessionalBody']))
+            story.append(Spacer(1, 25))
+        
+        # Photos section with professional numbering
+        if images:
+            story.append(Paragraph("3. DOCUMENTATION PHOTOGRAPHIQUE", self.styles['CustomSubtitle']))
+            story.append(Spacer(1, 15))
+            
+            story.append(Paragraph(f"Nombre total de photos : <b>{len(images)}</b>", self.styles['ProfessionalBody']))
+            story.append(Spacer(1, 20))
+            
+            for img_data in images:
+                try:
+                    # Add photo with professional formatting
+                    if os.path.exists(img_data['path']):
+                        # Create image with max width of 400 points (about 5.5 inches)
+                        img = ReportLabImage(img_data['path'], width=400, height=300, kind='proportional')
+                        
+                        # Professional image container
+                        image_table = Table([[img]], colWidths=[400])
+                        image_table.setStyle(TableStyle([
+                            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                            ('BOX', (0, 0), (-1, -1), 1, self.colors['primary']),
+                            ('BACKGROUND', (0, 0), (-1, -1), self.colors['white']),
+                        ]))
+                        
+                        story.append(image_table)
+                        story.append(Spacer(1, 10))
+                        
+                        # Professional caption with numbering
+                        caption_text = f"<b>{img_data['caption']}</b><br/>"
+                        caption_text += f"Format: {img_data.get('format', 'N/A')} | "
+                        caption_text += f"Résolution: {img_data.get('size', 'N/A')}"
+                        
+                        story.append(Paragraph(caption_text, self.styles['PhotoCaption']))
+                        story.append(Spacer(1, 25))
+                        
+                except Exception as e:
+                    print(f"Error adding image to professional PDF: {str(e)}")
+                    continue
+        
+        # Summary section
+        story.append(PageBreak())
+        story.append(Paragraph("4. RÉSUMÉ EXÉCUTIF", self.styles['CustomSubtitle']))
+        story.append(Spacer(1, 15))
+        
+        summary_text = f"""
+        Cette intervention de recherche terrain a été réalisée le {self._format_date(search_data.get('created_at'))} 
+        sur le site {location}. 
+        
+        L'intervention comprenait {len(images) if images else 0} prises de vue documentaires.
+        
+        Technicien responsable : {user_data.get('prenom', '')} {user_data.get('nom', '')}
+        
+        Statut actuel : {search_data.get('status', 'ACTIVE')}
+        """
+        
+        story.append(Paragraph(summary_text, self.styles['ProfessionalBody']))
+        story.append(Spacer(1, 40))
+        
+        # Professional signature block
+        signature_data = [
+            ['Technicien :', f"{user_data.get('prenom', '')} {user_data.get('nom', '')}"],
+            ['Email :', user_data.get('email', 'N/A')],
+            ['Date :', datetime.now().strftime('%d/%m/%Y')],
+            ['Signature :', '']
+        ]
+        
+        signature_table = Table(signature_data, colWidths=[2*inch, 4*inch])
+        signature_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (0, -1), self.colors['light_blue']),
+            ('TEXTCOLOR', (0, 0), (-1, -1), self.colors['text']),
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (0, -1), 'Helvetica-Bold'),
+            ('FONTNAME', (1, 0), (1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 0), (-1, -1), 10),
+            ('GRID', (0, 0), (-1, -1), 1, self.colors['primary']),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ]))
+        
+        story.append(signature_table)
+        
+        # Build the professional PDF
+        doc.build(story, onFirstPage=self.create_professional_header_footer, 
+                 onLaterPages=self.create_professional_header_footer)
+        
+        buffer.seek(0)
+        return buffer
+
+    def _format_date(self, date_str):
+        """Format date professionally"""
+        if not date_str:
+            return datetime.now().strftime('%d/%m/%Y')
+        
+        try:
+            if isinstance(date_str, str):
+                dt = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+            else:
+                dt = date_str
+            return dt.strftime('%d/%m/%Y à %H:%M')
+        except:
+            return datetime.now().strftime('%d/%m/%Y')
+
+    def _format_coordinates(self, lat, lng):
+        """Format GPS coordinates professionally"""
+        if lat and lng:
+            return f"{lat:.6f}, {lng:.6f}"
+        return "Non disponible"
+
+    async def cleanup_temp_files(self, file_paths: List[str], delay: int = 300):
+        """Clean up temporary files after delay"""
+        await asyncio.sleep(delay)
+        for file_path in file_paths:
+            try:
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+            except Exception as e:
+                print(f"Error cleaning up file {file_path}: {str(e)}")
+
+# Legacy class for backward compatibility
+class PDFReportGenerator(ProfessionalPDFReportGenerator):
+    def __init__(self):
+        super().__init__()
+        
+    async def process_images(self, images):
+        return await self.process_professional_images(images)
+        
+    def generate_search_report(self, search_data, user_data, images=None):
+        return self.generate_professional_search_report(search_data, user_data, images)
+
+@api_router.post("/reports/generate-pdf/{search_id}")
+async def generate_search_pdf(
+    search_id: str,
+    images: Optional[List[UploadFile]] = File(None),
+    current_user: User = Depends(get_current_user)
+):
+    """Generate PDF report for a specific search"""
+    # Get search data
+    search = await db.searches.find_one({
+        "id": search_id,
+        "company_id": current_user.company_id
+    })
+    
+    if not search:
+        raise HTTPException(status_code=404, detail="Recherche non trouvée")
+    
+    try:
+        # Initialize PDF generator
+        pdf_generator = PDFReportGenerator()
+        
+        # Process images if provided
+        processed_images = []
+        temp_files = []
+        
+        if images:
+            processed_images = await pdf_generator.process_images(images)
+            temp_files = [img['path'] for img in processed_images]
+        
+        # Generate PDF
+        search_data = clean_mongo_doc(search)
+        user_data = {
+            'prenom': current_user.prenom,
+            'nom': current_user.nom,
+            'email': current_user.email
+        }
+        
+        pdf_buffer = pdf_generator.generate_search_report(search_data, user_data, processed_images)
+        
+        # Create temporary PDF file
+        temp_pdf_path = os.path.join(pdf_generator.temp_dir, f"report_{search_id}_{uuid.uuid4().hex}.pdf")
+        
+        async with aiofiles.open(temp_pdf_path, 'wb') as f:
+            await f.write(pdf_buffer.getvalue())
+        
+        temp_files.append(temp_pdf_path)
+        
+        # Schedule cleanup
+        asyncio.create_task(pdf_generator.cleanup_temp_files(temp_files))
+        
+        # Generate filename
+        location_clean = search_data.get('location', 'recherche').replace(' ', '_').replace('/', '_')
+        filename = f"rapport_{location_clean}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        
+        return FileResponse(
+            path=temp_pdf_path,
+            filename=filename,
+            media_type='application/pdf',
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "X-Report-Type": "Search Report",
+                "X-Generated-Time": datetime.now().isoformat()
+            }
+        )
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors de la génération du PDF: {str(e)}"
+        )
+
+class SearchIdsRequest(BaseModel):
+    search_ids: List[str]
+
+@api_router.post("/reports/generate-summary-pdf")
+async def generate_summary_pdf(
+    request: SearchIdsRequest,
+    current_user: User = Depends(get_current_user)
+):
+    """Generate a summary PDF report for multiple searches"""
+    search_ids = request.search_ids
+    if not search_ids:
+        raise HTTPException(status_code=400, detail="Aucune recherche sélectionnée")
+    
+    # Get searches data
+    searches = await db.searches.find({
+        "id": {"$in": search_ids},
+        "company_id": current_user.company_id
+    }).to_list(None)
+    
+    if not searches:
+        raise HTTPException(status_code=404, detail="Aucune recherche trouvée")
+    
+    try:
+        # Generate combined PDF (simplified version for now)
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pageSize=A4)
+        styles = getSampleStyleSheet()
+        story = []
+        
+        # Header
+        story.append(Paragraph("RAPPORT DE SYNTHÈSE", styles['Title']))
+        story.append(Spacer(1, 20))
+        
+        # Summary info
+        story.append(Paragraph(f"Nombre de recherches: {len(searches)}", styles['Normal']))
+        story.append(Paragraph(f"Généré par: {current_user.prenom} {current_user.nom}", styles['Normal']))
+        story.append(Paragraph(f"Date: {datetime.now().strftime('%d/%m/%Y à %H:%M')}", styles['Normal']))
+        story.append(Spacer(1, 30))
+        
+        # List searches
+        for i, search in enumerate(searches, 1):
+            search_clean = clean_mongo_doc(search)
+            story.append(Paragraph(f"{i}. {search_clean.get('location', 'N/A')}", styles['Heading2']))
+            story.append(Paragraph(f"Description: {search_clean.get('description', 'N/A')}", styles['Normal']))
+            
+            # Format date safely
+            created_at = search_clean.get('created_at')
+            if created_at:
+                try:
+                    if isinstance(created_at, str):
+                        dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+                    elif isinstance(created_at, datetime):
+                        dt = created_at
+                    else:
+                        dt = datetime.now()
+                    date_str = dt.strftime('%d/%m/%Y')
+                except Exception:
+                    date_str = datetime.now().strftime('%d/%m/%Y')
+            else:
+                date_str = datetime.now().strftime('%d/%m/%Y')
+                
+            story.append(Paragraph(f"Date: {date_str}", styles['Normal']))
+            story.append(Spacer(1, 15))
+        
+        doc.build(story)
+        buffer.seek(0)
+        
+        # Save to temp file
+        temp_dir = "/tmp/reports"
+        os.makedirs(temp_dir, exist_ok=True)
+        temp_path = os.path.join(temp_dir, f"summary_{uuid.uuid4().hex}.pdf")
+        
+        async with aiofiles.open(temp_path, 'wb') as f:
+            await f.write(buffer.getvalue())
+        
+        # Schedule cleanup
+        asyncio.create_task(cleanup_temp_file(temp_path))
+        
+        filename = f"synthese_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        
+        return FileResponse(
+            path=temp_path,
+            filename=filename,
+            media_type='application/pdf',
+            headers={
+                "Content-Disposition": f"attachment; filename={filename}",
+                "X-Report-Type": "Summary Report"
+            }
+        )
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors de la génération du PDF de synthèse: {str(e)}"
+        )
+
+# Utility function for cleanup
+async def cleanup_temp_file(file_path: str, delay: int = 300):
+    """Clean up temporary file after delay"""
+    await asyncio.sleep(delay)
+    try:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+    except Exception as e:
+        print(f"Error cleaning up file {file_path}: {str(e)}")
+
+# Enhanced client management endpoints
+@api_router.put("/clients/{client_id}")
+async def update_client(
+    client_id: str,
+    client_data: dict,
+    current_user: User = Depends(get_current_user)
+):
+    """Update client information"""
+    try:
+        result = await db.clients.update_one(
+            {
+                "id": client_id,
+                "company_id": current_user.company_id
+            },
+            {
+                "$set": {
+                    **client_data,
+                    "updated_at": datetime.utcnow().isoformat()
+                }
+            }
+        )
+        
+        if result.modified_count == 0:
+            raise HTTPException(status_code=404, detail="Client non trouvé")
+        
+        return {"message": "Client mis à jour avec succès"}
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors de la mise à jour du client: {str(e)}"
+        )
+
+@api_router.delete("/clients/{client_id}")
+async def delete_client(
+    client_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Delete a client"""
+    try:
+        result = await db.clients.delete_one({
+            "id": client_id,
+            "company_id": current_user.company_id
+        })
+        
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Client non trouvé")
+        
+        return {"message": "Client supprimé avec succès"}
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors de la suppression du client: {str(e)}"
+        )
+
+# Enhanced quote management
+@api_router.put("/quotes/{quote_id}")
+async def update_quote(
+    quote_id: str,
+    quote_data: dict,
+    current_user: User = Depends(get_current_user)
+):
+    """Update quote"""
+    try:
+        result = await db.quotes.update_one(
+            {
+                "id": quote_id,
+                "company_id": current_user.company_id
+            },
+            {
+                "$set": {
+                    **quote_data,
+                    "updated_at": datetime.utcnow().isoformat()
+                }
+            }
+        )
+        
+        if result.modified_count == 0:
+            raise HTTPException(status_code=404, detail="Devis non trouvé")
+        
+        return {"message": "Devis mis à jour avec succès"}
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors de la mise à jour du devis: {str(e)}"
+        )
+
+@api_router.delete("/quotes/{quote_id}")
+async def delete_quote(
+    quote_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Delete a quote"""
+    try:
+        result = await db.quotes.delete_one({
+            "id": quote_id,
+            "company_id": current_user.company_id
+        })
+        
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Devis non trouvé")
+        
+        return {"message": "Devis supprimé avec succès"}
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors de la suppression du devis: {str(e)}"
+        )
+
+# Planning/Sites management endpoints
+@api_router.post("/sites")
+async def create_site(
+    site_data: dict,
+    current_user: User = Depends(get_current_user)
+):
+    """Create a new site/planning entry"""
+    try:
+        site = {
+            "id": str(uuid.uuid4()),
+            "company_id": current_user.company_id,
+            "created_by": current_user.id,
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat(),
+            **site_data
+        }
+        
+        await db.sites.insert_one(site)
+        return clean_mongo_doc(site)
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors de la création du site: {str(e)}"
+        )
+
+@api_router.get("/sites")
+async def get_sites(current_user: User = Depends(get_current_user)):
+    """Get all sites for the company"""
+    try:
+        sites = await db.sites.find({
+            "company_id": current_user.company_id
+        }).sort("scheduled_date", 1).to_list(100)
+        
+        return [clean_mongo_doc(site) for site in sites]
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors du chargement des sites: {str(e)}"
+        )
+
+@api_router.put("/sites/{site_id}")
+async def update_site(
+    site_id: str,
+    site_data: dict,
+    current_user: User = Depends(get_current_user)
+):
+    """Update site information"""
+    try:
+        result = await db.sites.update_one(
+            {
+                "id": site_id,
+                "company_id": current_user.company_id
+            },
+            {
+                "$set": {
+                    **site_data,
+                    "updated_at": datetime.utcnow().isoformat()
+                }
+            }
+        )
+        
+        if result.modified_count == 0:
+            raise HTTPException(status_code=404, detail="Site non trouvé")
+        
+        return {"message": "Site mis à jour avec succès"}
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors de la mise à jour du site: {str(e)}"
+        )
+
+@api_router.delete("/sites/{site_id}")
+async def delete_site(
+    site_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Delete a site"""
+    try:
+        result = await db.sites.delete_one({
+            "id": site_id,
+            "company_id": current_user.company_id
+        })
+        
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Site non trouvé")
+        
+        return {"message": "Site supprimé avec succès"}
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors de la suppression du site: {str(e)}"
+        )
+
+# Invitation management endpoints
+@api_router.post("/invitations")
+async def create_invitation(
+    invitation_data: dict,
+    current_user: User = Depends(get_current_user)
+):
+    """Create a new user invitation"""
+    try:
+        # Only Bureau/Admin can invite
+        if current_user.role not in [UserRole.BUREAU, UserRole.ADMIN]:
+            raise HTTPException(status_code=403, detail="Accès refusé: seuls les utilisateurs Bureau/Admin peuvent inviter")
+
+        # Check if user already exists
+        existing_user = await db.users.find_one({
+            "email": invitation_data["email"]
+        })
+        
+        if existing_user:
+            raise HTTPException(status_code=400, detail="Un utilisateur avec cet email existe déjà")
+        
+        # Check for existing pending invitation
+        existing_invitation = await db.invitations.find_one({
+            "email": invitation_data["email"],
+            "company_id": current_user.company_id,
+            "status": "PENDING"
+        })
+        
+        if existing_invitation:
+            raise HTTPException(status_code=400, detail="Une invitation est déjà en attente pour cet email")
+        
+        invitation = {
+            "id": str(uuid.uuid4()),
+            "company_id": current_user.company_id,
+            "invited_by": current_user.id,
+            "email": invitation_data["email"],
+            "role": invitation_data["role"],
+            "message": invitation_data.get("message", ""),
+            "status": "PENDING",
+            "sent_at": datetime.utcnow().isoformat(),
+            "expires_at": (datetime.utcnow() + timedelta(days=7)).isoformat(),
+            "created_at": datetime.utcnow().isoformat()
+        }
+        
+        await db.invitations.insert_one(invitation)
+        
+        # TODO: Send email invitation here
+        # send_invitation_email(invitation)
+        
+        return clean_mongo_doc(invitation)
+        
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors de la création de l'invitation: {str(e)}"
+        )
+
+@api_router.get("/invitations")
+async def get_invitations(current_user: User = Depends(get_current_user)):
+    """Get all invitations for the company"""
+    try:
+        invitations = await db.invitations.find({
+            "company_id": current_user.company_id
+        }).sort("sent_at", -1).to_list(100)
+        # Attach company name
+        company = None
+        if current_user.company_id:
+            company = await db.companies.find_one({"id": current_user.company_id})
+        company_name = company.get("name") if company else None
+
+        enriched = []
+        for invitation in invitations:
+            inv = clean_mongo_doc(invitation)
+            inv["company_name"] = company_name
+            enriched.append(inv)
+        return enriched
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors du chargement des invitations: {str(e)}"
+        )
+
+@api_router.get("/invitations/received")
+async def get_received_invitations(current_user: User = Depends(get_current_user)):
+    """Get invitations addressed to the current user's email (PENDING only)."""
+    try:
+        invitations = await db.invitations.find({
+            "email": current_user.email,
+            "status": "PENDING"
+        }).sort("sent_at", -1).to_list(50)
+        # Collect company_ids
+        company_ids = list({inv["company_id"] for inv in invitations if inv.get("company_id")})
+        company_map = {}
+        if company_ids:
+            companies = await db.companies.find({"id": {"$in": company_ids}}).to_list(len(company_ids))
+            for c in companies:
+                company_map[c.get("id")] = c.get("name")
+
+        enriched = []
+        for invitation in invitations:
+            inv = clean_mongo_doc(invitation)
+            inv["company_name"] = company_map.get(inv.get("company_id"))
+            enriched.append(inv)
+        return enriched
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors du chargement des invitations reçues: {str(e)}"
+        )
+
+@api_router.post("/invitations/{invitation_id}/accept")
+async def accept_invitation(invitation_id: str, current_user: User = Depends(get_current_user)):
+    """Accept an invitation and join the company with the invited role (defaults to TECHNICIEN)."""
+    try:
+        invitation = await db.invitations.find_one({
+            "id": invitation_id,
+            "email": current_user.email,
+            "status": "PENDING"
+        })
+
+        if not invitation:
+            raise HTTPException(status_code=404, detail="Invitation non trouvée ou déjà traitée")
+
+        # Determine role (force TECHNICIEN to ensure no Bureau access for standard users)
+        invited_role = invitation.get("role", "TECHNICIEN")
+        if invited_role not in [r.value for r in UserRole]:
+            invited_role = "TECHNICIEN"
+        # If role is BUREAU, we still keep TECHNICIEN as per product rule in this flow
+        if invited_role == UserRole.BUREAU.value:
+            invited_role = UserRole.TECHNICIEN.value
+
+        # Update user to join the company as invited role
+        update_fields = {
+            "company_id": invitation["company_id"],
+            "role": invited_role
+        }
+        await db.users.update_one({"id": current_user.id}, {"$set": update_fields})
+
+        # Mark invitation as accepted
+        await db.invitations.update_one(
+            {"id": invitation_id},
+            {"$set": {"status": "ACCEPTED", "accepted_at": datetime.utcnow().isoformat(), "accepted_by": current_user.id}}
+        )
+
+        # Return updated user data
+        user_doc = await db.users.find_one({"id": current_user.id})
+        user_data = clean_mongo_doc(user_doc)
+        user_data.pop("password_hash", None)
+        return {"message": "Invitation acceptée", "user": user_data}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de l'acceptation de l'invitation: {str(e)}")
+
+@api_router.post("/invitations/{invitation_id}/decline")
+async def decline_invitation(invitation_id: str, current_user: User = Depends(get_current_user)):
+    """Decline an invitation addressed to the current user's email."""
+    try:
+        invitation = await db.invitations.find_one({
+            "id": invitation_id,
+            "email": current_user.email,
+            "status": "PENDING"
+        })
+        if not invitation:
+            raise HTTPException(status_code=404, detail="Invitation non trouvée ou déjà traitée")
+
+        await db.invitations.update_one(
+            {"id": invitation_id},
+            {"$set": {"status": "DECLINED", "declined_at": datetime.utcnow().isoformat(), "declined_by": current_user.id}}
+        )
+        return {"message": "Invitation refusée"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors du refus de l'invitation: {str(e)}")
+
+@api_router.post("/auth/leave-company")
+async def leave_company(current_user: User = Depends(get_current_user)):
+    """Allow a user to leave their current company and revert to TECHNICIEN role without company."""
+    try:
+        await db.users.update_one(
+            {"id": current_user.id},
+            {"$set": {"company_id": None, "role": UserRole.TECHNICIEN.value, "left_company_at": datetime.utcnow().isoformat()}}
+        )
+
+        user_doc = await db.users.find_one({"id": current_user.id})
+        user_data = clean_mongo_doc(user_doc)
+        user_data.pop("password_hash", None)
+        return {"message": "Entreprise quittée avec succès", "user": user_data}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la sortie de l'entreprise: {str(e)}")
+
+@api_router.put("/invitations/{invitation_id}/resend")
+async def resend_invitation(
+    invitation_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Resend an invitation"""
+    try:
+        result = await db.invitations.update_one(
+            {
+                "id": invitation_id,
+                "company_id": current_user.company_id,
+                "status": "PENDING"
+            },
+            {
+                "$set": {
+                    "sent_at": datetime.utcnow().isoformat(),
+                    "expires_at": (datetime.utcnow() + timedelta(days=7)).isoformat()
+                }
+            }
+        )
+        
+        if result.modified_count == 0:
+            raise HTTPException(status_code=404, detail="Invitation non trouvée")
+        
+        # TODO: Resend email invitation here
+        
+        return {"message": "Invitation renvoyée avec succès"}
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors du renvoi de l'invitation: {str(e)}"
+        )
+
+@api_router.delete("/invitations/{invitation_id}")
+async def cancel_invitation(
+    invitation_id: str,
+    current_user: User = Depends(get_current_user)
+):
+    """Cancel an invitation"""
+    try:
+        result = await db.invitations.update_one(
+            {
+                "id": invitation_id,
+                "company_id": current_user.company_id
+            },
+            {
+                "$set": {
+                    "status": "CANCELLED",
+                    "cancelled_at": datetime.utcnow().isoformat()
+                }
+            }
+        )
+        
+        if result.modified_count == 0:
+            raise HTTPException(status_code=404, detail="Invitation non trouvée")
+        
+        return {"message": "Invitation annulée avec succès"}
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur lors de l'annulation de l'invitation: {str(e)}"
+        )
+
+# Initialize sample data
+@api_router.post("/init-sample-data")
+async def init_sample_data():
+    # Créer une entreprise exemple
+    company = Company(name="Entreprise Exemple")
+    company_dict = company.dict()
+    company_dict.pop('_id', None)
+    await db.companies.insert_one(company_dict)
+    
+    # Créer des utilisateurs exemple
+    bureau_user = User(
+        email="bureau@search-app.fr",
+        nom="Bureau",
+        prenom="Manager",
+        role=UserRole.BUREAU,
+        company_id=company.id,
+        password_hash=hash_password("bureau123")
+    )
+    
+    tech_user = User(
+        email="tech@search-app.fr", 
+        nom="Technicien",
+        prenom="Terrain",
+        role=UserRole.TECHNICIEN,
+        company_id=company.id,
+        password_hash=hash_password("tech123")
+    )
+    
+    bureau_dict = bureau_user.dict()
+    bureau_dict.pop('_id', None)
+    tech_dict = tech_user.dict()
+    tech_dict.pop('_id', None)
+    
+    await db.users.insert_one(bureau_dict)
+    await db.users.insert_one(tech_dict)
+    
+    # Créer quelques recherches exemple
+    search1 = Search(
+        user_id=tech_user.id,
+        company_id=company.id,
+        location="Chantier Avenue des Champs",
+        description="Recherche de canalisations sous-terraines",
+        observations="Sol dur, besoin d'équipement spécialisé",
+        latitude=48.8566,
+        longitude=2.3522
+    )
+    
+    search2 = Search(
+        user_id=tech_user.id,
+        company_id=company.id,
+        location="Site Boulevard Saint-Michel",
+        description="Vérification réseaux électriques",
+        observations="Ancien bâtiment, schémas non disponibles",
+        latitude=48.8534,
+        longitude=2.3488
+    )
+    
+    search1_dict = search1.dict()
+    search1_dict.pop('_id', None)
+    search2_dict = search2.dict()
+    search2_dict.pop('_id', None)
+    
+    await db.searches.insert_one(search1_dict)
+    await db.searches.insert_one(search2_dict)
+    
+    # Créer un client exemple
+    client = Client(
+        company_id=company.id,
+        nom="Client Test SARL",
+        email="contact@client-test.fr",
+        telephone="01 23 45 67 89",
+        adresse="123 Rue de la Paix, 75001 Paris"
+    )
+    client_dict = client.dict()
+    client_dict.pop('_id', None)
+    await db.clients.insert_one(client_dict)
+    
+    return {"message": "Données d'exemple créées avec succès"}
+
+# New Enhanced Endpoints for Complete Functionality
+
+@api_router.post("/reports/share-to-bureau")
+async def share_reports_to_bureau(request: dict, current_user: User = Depends(get_current_user)):
+    """Share selected search reports to Bureau interface"""
+    search_ids = request.get("search_ids", [])
+    
+    if not search_ids:
+        raise HTTPException(status_code=400, detail="Aucune recherche sélectionnée")
+    
+    # Get all searches
+    search_docs = await db.searches.find({"id": {"$in": search_ids}}).to_list(length=100)
+    
+    if not search_docs:
+        raise HTTPException(status_code=404, detail="Aucune recherche trouvée")
+    
+    # Create report entries for each search
+    reports_created = []
+    for search in search_docs:
+        # Create report entry
+        report = {
+            "id": str(uuid.uuid4()),
+            "search_id": search["id"],
+            "user_id": search["user_id"], 
+            "company_id": search["company_id"],
+            "title": f"Rapport - {search['location']}",
+            "content": f"Rapport automatique pour {search['location']}",
+            "status": "SHARED_TO_BUREAU",
+            "shared_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.utcnow().isoformat()
+        }
+        
+        await db.reports.insert_one(report)
+        reports_created.append(clean_mongo_doc(report))
+        
+        # Update search status
+        await db.searches.update_one(
+            {"id": search["id"]},
+            {"$set": {"status": "SHARED_TO_BUREAU"}}
+        )
+    
+    return {
+        "message": f"{len(reports_created)} rapport(s) partagé(s) avec le Bureau",
+        "reports_created": len(reports_created)
+    }
+
+@api_router.post("/quotes/{quote_id}/convert-to-worksite")
+async def convert_quote_to_worksite(
+    quote_id: str, 
+    current_user: User = Depends(get_current_user)
+):
+    """Convert accepted quote to worksite/chantier"""
+    # Get quote
+    quote = await db.quotes.find_one({"id": quote_id})
+    if not quote:
+        raise HTTPException(status_code=404, detail="Devis non trouvé")
+    
+    if quote["status"] != "ACCEPTED":
+        raise HTTPException(status_code=400, detail="Seuls les devis acceptés peuvent être convertis")
+    
+    # Get client info
+    client = await db.clients.find_one({"id": quote["client_id"]})
+    client_name = client["nom"] if client else "Client Inconnu"
+    
+    # Create worksite
+    worksite = {
+        "id": str(uuid.uuid4()),
+        "title": f"Chantier - {quote['title']}",
+        "client_id": quote["client_id"],
+        "client_name": client_name,
+        "quote_id": quote_id,
+        "company_id": quote["company_id"],
+        "source": "QUOTE",
+        "status": "PLANNED",
+        "description": quote.get("description", ""),
+        "amount": quote.get("amount", 0),
+        "quote_pdf_url": f"/api/quotes/{quote_id}/pdf",
+        "created_at": datetime.utcnow().isoformat(),
+        "updated_at": datetime.utcnow().isoformat()
+    }
+    
+    # Insert worksite
+    await db.worksites.insert_one(worksite)
+    
+    # Update quote status
+    await db.quotes.update_one(
+        {"id": quote_id},
+        {"$set": {
+            "status": "CONVERTED_TO_WORKSITE",
+            "worksite_id": worksite["id"],
+            "converted_at": datetime.utcnow().isoformat()
+        }}
+    )
+    
+    return {
+        "message": "Devis converti en chantier avec succès",
+        "worksite": clean_mongo_doc(worksite)
+    }
+
+@api_router.get("/worksites")
+async def get_worksites(current_user: User = Depends(get_current_user)):
+    """Get all worksites for the current user's company"""
+    try:
+        worksites = await db.worksites.find({"company_id": current_user.company_id}).to_list(length=100)
+        return [clean_mongo_doc(worksite) for worksite in worksites]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors du chargement: {str(e)}")
+
+@api_router.post("/worksites")
+async def create_worksite(worksite_data: dict, current_user: User = Depends(get_current_user)):
+    """Create a new worksite manually"""
+    try:
+        worksite = {
+            "id": str(uuid.uuid4()),
+            "title": worksite_data["title"],
+            "client_id": worksite_data.get("client_id"),
+            "company_id": current_user.company_id,
+            "source": "MANUAL",
+            "status": worksite_data.get("status", "PLANNED"),
+            "description": worksite_data.get("description", ""),
+            "address": worksite_data.get("address", ""),
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat()
+        }
+        
+        await db.worksites.insert_one(worksite)
+        
+        return clean_mongo_doc(worksite)
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la création: {str(e)}")
+
+# Planning/Schedule Management Endpoints
+@api_router.get("/schedules")
+async def get_schedules(current_user: User = Depends(get_current_user)):
+    """Get all schedules for the current user's company"""
+    try:
+        schedules = await db.schedules.find({"company_id": current_user.company_id}).to_list(length=100)
+        return [clean_mongo_doc(schedule) for schedule in schedules]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors du chargement: {str(e)}")
+
+@api_router.post("/schedules")
+async def create_schedule(schedule_data: dict, current_user: User = Depends(get_current_user)):
+    """Create a new schedule/planning"""
+    try:
+        schedule = {
+            "id": str(uuid.uuid4()),
+            "worksite_id": schedule_data["worksite_id"],
+            "team_leader_id": schedule_data["team_leader_id"],
+            "collaborator_id": schedule_data["collaborator_id"],
+            "company_id": current_user.company_id,
+            "date": schedule_data["date"],
+            "time": schedule_data["time"],
+            "shift": schedule_data["shift"],
+            "hours": schedule_data["hours"],
+            "description": schedule_data.get("description", ""),
+            "status": "scheduled",
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat()
+        }
+        
+        await db.schedules.insert_one(schedule)
+        
+        return clean_mongo_doc(schedule)
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la création: {str(e)}")
+
+@api_router.put("/schedules/{schedule_id}")
+async def update_schedule(schedule_id: str, schedule_data: dict, current_user: User = Depends(get_current_user)):
+    """Update an existing schedule"""
+    try:
+        update_data = {
+            "worksite_id": schedule_data["worksite_id"],
+            "team_leader_id": schedule_data["team_leader_id"],
+            "collaborator_id": schedule_data["collaborator_id"],
+            "date": schedule_data["date"],
+            "time": schedule_data["time"],
+            "shift": schedule_data["shift"],
+            "hours": schedule_data["hours"],
+            "description": schedule_data.get("description", ""),
+            "status": schedule_data.get("status", "scheduled"),
+            "updated_at": datetime.utcnow().isoformat()
+        }
+        
+        result = await db.schedules.update_one(
+            {"id": schedule_id, "company_id": current_user.company_id}, 
+            {"$set": update_data}
+        )
+        
+        if result.modified_count == 0:
+            raise HTTPException(status_code=404, detail="Planning non trouvé")
+        
+        updated_schedule = await db.schedules.find_one({"id": schedule_id})
+        return clean_mongo_doc(updated_schedule)
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la modification: {str(e)}")
+
+@api_router.delete("/schedules/{schedule_id}")
+async def delete_schedule(schedule_id: str, current_user: User = Depends(get_current_user)):
+    """Delete a schedule"""
+    try:
+        result = await db.schedules.delete_one(
+            {"id": schedule_id, "company_id": current_user.company_id}
+        )
+        
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Planning non trouvé")
+        
+        return {"message": "Planning supprimé avec succès"}
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la suppression: {str(e)}")
+
+# Team Leaders Management
+@api_router.get("/team-leaders")
+async def get_team_leaders(current_user: User = Depends(get_current_user)):
+    """Get all team leaders for the current user's company"""
+    try:
+        leaders = await db.team_leaders.find({"company_id": current_user.company_id}).to_list(length=100)
+        return [clean_mongo_doc(leader) for leader in leaders]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors du chargement: {str(e)}")
+
+@api_router.post("/team-leaders")
+async def create_team_leader(leader_data: dict, current_user: User = Depends(get_current_user)):
+    """Create a new team leader"""
+    try:
+        leader = {
+            "id": str(uuid.uuid4()),
+            "nom": leader_data["nom"],
+            "prenom": leader_data["prenom"],
+            "email": leader_data.get("email", ""),
+            "telephone": leader_data.get("telephone", ""),
+            "specialite": leader_data["specialite"],
+            "couleur": leader_data["couleur"],
+            "company_id": current_user.company_id,
+            "created_at": datetime.utcnow().isoformat()
+        }
+        
+        await db.team_leaders.insert_one(leader)
+        
+        return clean_mongo_doc(leader)
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la création: {str(e)}")
+
+# Collaborators Management
+@api_router.get("/collaborators")
+async def get_collaborators(current_user: User = Depends(get_current_user)):
+    """Get all collaborators for the current user's company"""
+    try:
+        collaborators = await db.collaborators.find({"company_id": current_user.company_id}).to_list(length=100)
+        return [clean_mongo_doc(collaborator) for collaborator in collaborators]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors du chargement: {str(e)}")
+
+@api_router.post("/collaborators")
+async def create_collaborator(collab_data: dict, current_user: User = Depends(get_current_user)):
+    """Create a new collaborator"""
+    try:
+        collaborator = {
+            "id": str(uuid.uuid4()),
+            "nom": collab_data["nom"],
+            "prenom": collab_data["prenom"],
+            "email": collab_data.get("email", ""),
+            "telephone": collab_data.get("telephone", ""),
+            "competences": collab_data["competences"],
+            "team_leader_id": collab_data["team_leader_id"],
+            "company_id": current_user.company_id,
+            "created_at": datetime.utcnow().isoformat()
+        }
+        
+        await db.collaborators.insert_one(collaborator)
+        
+        return clean_mongo_doc(collaborator)
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors de la création: {str(e)}")
+
+# Get user count for statistics
+@api_router.get("/stats/users")
+async def get_user_count():
+    try:
+        count = await db.users.count_documents({})
+        return {"count": count}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Erreur lors du comptage des utilisateurs: {str(e)}")
+
+# Material Management Functions
+def generate_qr_code(data: str) -> str:
+    """Generate QR code and return as base64 string"""
+    try:
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(data)
+        qr.make(fit=True)
+        
+        img = qr.make_image(fill_color="black", back_color="white")
+        
+        # Convert to base64
+        buffer = io.BytesIO()
+        img.save(buffer, format='PNG')
+        img_str = base64.b64encode(buffer.getvalue()).decode()
+        
+        return img_str
+    except Exception as e:
+        logging.error(f"Error generating QR code: {e}")
+        return ""
+
+def generate_material_qr_id(company_id: str, material_name: str) -> str:
+    """Generate unique QR code ID for material"""
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    unique_id = f"MAT_{company_id}_{timestamp}_{uuid.uuid4().hex[:8].upper()}"
+    return unique_id
+
+# Material Management Endpoints
+
+@api_router.post("/materials")
+async def create_material(material_data: MaterialCreate, token: dict = Depends(verify_token)):
+    """Create new material with QR code"""
+    try:
+        user_company = token.get("company")
+        if not user_company:
+            raise HTTPException(status_code=400, detail="Company not found in token")
+        
+        # Generate unique QR code
+        qr_code = generate_material_qr_id(user_company, material_data.name)
+        
+        # Generate QR code image
+        qr_image = generate_qr_code(qr_code)
+        
+        # Create material document
+        material_doc = {
+            "id": str(uuid.uuid4()),
+            "company_id": user_company,
+            "name": material_data.name,
+            "description": material_data.description,
+            "category": material_data.category.value,
+            "brand": material_data.brand,
+            "model": material_data.model,
+            "serial_number": material_data.serial_number,
+            "purchase_date": material_data.purchase_date,
+            "purchase_price": material_data.purchase_price,
+            "location": material_data.location,
+            "qr_code": qr_code,
+            "qr_image": qr_image,
+            "status": MaterialStatus.AVAILABLE.value,
+            "current_user_id": None,
+            "last_maintenance": None,
+            "created_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.utcnow().isoformat()
+        }
+        
+        # Insert into database
+        result = await db.materials.insert_one(material_doc)
+        
+        if result.inserted_id:
+            return clean_mongo_doc(material_doc)
+        else:
+            raise HTTPException(status_code=500, detail="Failed to create material")
+            
+    except Exception as e:
+        logging.error(f"Error creating material: {e}")
+        raise HTTPException(status_code=500, detail=f"Error creating material: {str(e)}")
+
+@api_router.get("/materials")
+async def get_materials(token: dict = Depends(verify_token)):
+    """Get all materials for company"""
+    try:
+        user_company = token.get("company")
+        if not user_company:
+            raise HTTPException(status_code=400, detail="Company not found in token")
+        
+        materials = await db.materials.find({"company_id": user_company}).to_list(length=None)
+        return clean_mongo_docs(materials)
+        
+    except Exception as e:
+        logging.error(f"Error fetching materials: {e}")
+        raise HTTPException(status_code=500, detail=f"Error fetching materials: {str(e)}")
+
+@api_router.get("/materials/{material_id}")
+async def get_material(material_id: str, token: dict = Depends(verify_token)):
+    """Get specific material by ID"""
+    try:
+        user_company = token.get("company")
+        if not user_company:
+            raise HTTPException(status_code=400, detail="Company not found in token")
+        
+        material = await db.materials.find_one({
+            "id": material_id,
+            "company_id": user_company
+        })
+        
+        if not material:
+            raise HTTPException(status_code=404, detail="Material not found")
+        
+        return clean_mongo_doc(material)
+        
+    except Exception as e:
+        logging.error(f"Error fetching material: {e}")
+        raise HTTPException(status_code=500, detail=f"Error fetching material: {str(e)}")
+
+@api_router.post("/materials/scan")
+async def scan_material(assignment_data: MaterialAssign, token: dict = Depends(verify_token)):
+    """Assign material to user by scanning QR code"""
+    try:
+        user_id = token.get("user_id")
+        user_company = token.get("company")
+        
+        if not user_id or not user_company:
+            raise HTTPException(status_code=400, detail="User info not found in token")
+        
+        # Find material by QR code
+        material = await db.materials.find_one({
+            "qr_code": assignment_data.qr_code,
+            "company_id": user_company
+        })
+        
+        if not material:
+            raise HTTPException(status_code=404, detail="Material not found")
+        
+        # Check if material is available
+        if material.get("status") != MaterialStatus.AVAILABLE.value:
+            current_status = material.get("status", "Unknown")
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Material is not available. Current status: {current_status}"
+            )
+        
+        # Update material status
+        await db.materials.update_one(
+            {"id": material["id"]},
+            {
+                "$set": {
+                    "status": MaterialStatus.IN_USE.value,
+                    "current_user_id": user_id,
+                    "updated_at": datetime.utcnow().isoformat()
+                }
+            }
+        )
+        
+        # Create assignment record
+        assignment_doc = {
+            "id": str(uuid.uuid4()),
+            "material_id": material["id"],
+            "user_id": user_id,
+            "company_id": user_company,
+            "assigned_at": datetime.utcnow().isoformat(),
+            "returned_at": None,
+            "notes": assignment_data.notes
+        }
+        
+        await db.material_assignments.insert_one(assignment_doc)
+        
+        return {
+            "message": "Material assigned successfully",
+            "material": clean_mongo_doc(material),
+            "assignment": clean_mongo_doc(assignment_doc)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error scanning material: {e}")
+        raise HTTPException(status_code=500, detail=f"Error scanning material: {str(e)}")
+
+@api_router.post("/materials/{material_id}/return")
+async def return_material(material_id: str, token: dict = Depends(verify_token)):
+    """Return material to available status"""
+    try:
+        user_id = token.get("user_id")
+        user_company = token.get("company")
+        
+        if not user_id or not user_company:
+            raise HTTPException(status_code=400, detail="User info not found in token")
+        
+        # Find material
+        material = await db.materials.find_one({
+            "id": material_id,
+            "company_id": user_company,
+            "current_user_id": user_id
+        })
+        
+        if not material:
+            raise HTTPException(status_code=404, detail="Material not found or not assigned to you")
+        
+        # Update material status
+        await db.materials.update_one(
+            {"id": material_id},
+            {
+                "$set": {
+                    "status": MaterialStatus.AVAILABLE.value,
+                    "current_user_id": None,
+                    "updated_at": datetime.utcnow().isoformat()
+                }
+            }
+        )
+        
+        # Update assignment record
+        await db.material_assignments.update_one(
+            {
+                "material_id": material_id,
+                "user_id": user_id,
+                "returned_at": None
+            },
+            {
+                "$set": {
+                    "returned_at": datetime.utcnow().isoformat()
+                }
+            }
+        )
+        
+        return {"message": "Material returned successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error returning material: {e}")
+        raise HTTPException(status_code=500, detail=f"Error returning material: {str(e)}")
+
+@api_router.get("/materials/my-inventory")
+async def get_my_materials(token: dict = Depends(verify_token)):
+    """Get materials currently assigned to the user"""
+    try:
+        user_id = token.get("user_id")
+        user_company = token.get("company")
+        
+        if not user_id or not user_company:
+            raise HTTPException(status_code=400, detail="User info not found in token")
+        
+        materials = await db.materials.find({
+            "company_id": user_company,
+            "current_user_id": user_id,
+            "status": MaterialStatus.IN_USE.value
+        }).to_list(length=None)
+        
+        return clean_mongo_docs(materials)
+        
+    except Exception as e:
+        logging.error(f"Error fetching user materials: {e}")
+        raise HTTPException(status_code=500, detail=f"Error fetching user materials: {str(e)}")
+
+@api_router.delete("/materials/{material_id}")
+async def delete_material(material_id: str, token: dict = Depends(verify_token)):
+    """Delete material (Bureau only)"""
+    try:
+        user_company = token.get("company")
+        user_role = token.get("role")
+        
+        if not user_company:
+            raise HTTPException(status_code=400, detail="Company not found in token")
+        
+        if user_role not in ["ADMIN", "BUREAU", "SUPERUSER"]:
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        
+        # Check if material is in use
+        material = await db.materials.find_one({
+            "id": material_id,
+            "company_id": user_company
+        })
+        
+        if not material:
+            raise HTTPException(status_code=404, detail="Material not found")
+        
+        if material.get("status") == MaterialStatus.IN_USE.value:
+            raise HTTPException(status_code=400, detail="Cannot delete material that is in use")
+        
+        # Delete material
+        result = await db.materials.delete_one({
+            "id": material_id,
+            "company_id": user_company
+        })
+        
+        if result.deleted_count == 0:
+            raise HTTPException(status_code=404, detail="Material not found")
+        
+        return {"message": "Material deleted successfully"}
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"Error deleting material: {e}")
+        raise HTTPException(status_code=500, detail=f"Error deleting material: {str(e)}")
+
+# Include the router in the main app
+app.include_router(api_router)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+@app.on_event("shutdown")
+async def shutdown_db_client():
+    client.close()
+
+# Point d'entrée principal
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
