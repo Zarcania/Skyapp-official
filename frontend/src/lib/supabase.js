@@ -2,6 +2,9 @@
 // src/lib/supabase.js
 
 import { createClient } from '@supabase/supabase-js'
+import axios from 'axios'
+
+const API = process.env.REACT_APP_API_URL || 'http://localhost:8001/api'
 
 const supabaseUrl = process.env.REACT_APP_SUPABASE_URL
 const supabaseAnonKey = process.env.REACT_APP_SUPABASE_ANON_KEY
@@ -212,48 +215,108 @@ export const api = {
     }
   },
 
-  // Matériaux
+  // Matériaux (via backend API pour éviter les problèmes RLS)
   materials: {
     getAll: async () => {
-      const { data, error } = await supabase
-        .from('materials')
-        .select('*')
-        .order('name', { ascending: true })
-      return { data, error }
+      try {
+        const r = await axios.get(`${API}/materials`)
+        return { data: r.data.data || r.data, error: null }
+      } catch (e) { return { data: null, error: e.response?.data?.detail || e.message } }
     },
 
     create: async (material) => {
-      const { data, error } = await supabase
-        .from('materials')
-        .insert([material])
-        .select()
-      return { data, error }
+      try {
+        const r = await axios.post(`${API}/materials`, material)
+        return { data: r.data.data || r.data, error: null }
+      } catch (e) { return { data: null, error: e.response?.data?.detail || e.message } }
     },
 
     update: async (id, updates) => {
-      const { data, error } = await supabase
-        .from('materials')
-        .update(updates)
-        .eq('id', id)
-        .select()
-      return { data, error }
+      try {
+        const r = await axios.put(`${API}/materials/${id}`, updates)
+        return { data: r.data.data || r.data, error: null }
+      } catch (e) { return { data: null, error: e.response?.data?.detail || e.message } }
     },
 
     remove: async (id) => {
-      const { error } = await supabase
-        .from('materials')
-        .delete()
-        .eq('id', id)
-      return { error }
+      try {
+        await axios.delete(`${API}/materials/${id}`)
+        return { error: null }
+      } catch (e) { return { error: e.response?.data?.detail || e.message } }
     },
 
     scanQR: async (qrCode) => {
-      const { data, error } = await supabase
-        .from('materials')
-        .select('*')
-        .eq('qr_code', qrCode)
-        .single()
-      return { data, error }
+      try {
+        const r = await axios.get(`${API}/materials/qr/${encodeURIComponent(qrCode)}`)
+        return { data: r.data.data || r.data, error: null }
+      } catch (e) { return { data: null, error: e.response?.data?.detail || e.message } }
+    },
+
+    // Historique de maintenance
+    getMaintenanceLogs: async (materialId) => {
+      try {
+        const r = await axios.get(`${API}/materials/${materialId}/maintenance-logs`)
+        return { data: r.data.data || r.data, error: null }
+      } catch (e) { return { data: null, error: e.response?.data?.detail || e.message } }
+    },
+
+    addMaintenanceLog: async (log) => {
+      try {
+        const r = await axios.post(`${API}/materials/${log.material_id}/maintenance-logs`, log)
+        return { data: r.data.data || r.data, error: null }
+      } catch (e) { return { data: null, error: e.response?.data?.detail || e.message } }
+    },
+
+    deleteMaintenanceLog: async (id) => {
+      try {
+        await axios.delete(`${API}/maintenance-logs/${id}`)
+        return { error: null }
+      } catch (e) { return { error: e.response?.data?.detail || e.message } }
+    }
+  },
+
+  // Inventaire (Emprunt/Retour de matériel)
+  inventory: {
+    getMyCheckouts: async () => {
+      try {
+        const r = await axios.get(`${API}/inventory/my-checkouts`)
+        return r.data.data || []
+      } catch (e) { throw e }
+    },
+
+    getHistory: async () => {
+      try {
+        const r = await axios.get(`${API}/inventory/history`)
+        return r.data.data || []
+      } catch (e) { throw e }
+    },
+
+    getAvailable: async () => {
+      try {
+        const r = await axios.get(`${API}/inventory/available`)
+        return r.data.data || []
+      } catch (e) { throw e }
+    },
+
+    checkout: async (data) => {
+      try {
+        const r = await axios.post(`${API}/inventory/checkout`, data)
+        return r.data
+      } catch (e) { throw e }
+    },
+
+    checkin: async (checkoutId, data) => {
+      try {
+        const r = await axios.post(`${API}/inventory/checkin/${checkoutId}`, data)
+        return r.data
+      } catch (e) { throw e }
+    },
+
+    getCompanyCheckouts: async () => {
+      try {
+        const r = await axios.get(`${API}/inventory/company-checkouts`)
+        return r.data.data || []
+      } catch (e) { throw e }
     }
   },
 
@@ -273,20 +336,24 @@ export const api = {
     },
 
     getCurrent: async () => {
-      const { data: { user } } = await supabase.auth.getUser()
-      if (!user) return { data: null, error: 'Not authenticated' }
-
-      const { data, error } = await supabase
-        .from('users')
-        .select(`
-          *,
-          companies (
-            name
-          )
-        `)
-        .eq('id', user.id)
-        .single()
-      return { data, error }
+      // Utiliser le user stocké en localStorage (rempli au login via backend)
+      const stored = localStorage.getItem('user')
+      if (stored) {
+        try { return { data: JSON.parse(stored), error: null } } catch {}
+      }
+      // Fallback: essayer via Supabase Auth si session existe
+      try {
+        const { data: { user } } = await supabase.auth.getUser()
+        if (!user) return { data: null, error: 'Not authenticated' }
+        const { data, error } = await supabase
+          .from('users')
+          .select('*, companies(name)')
+          .eq('id', user.id)
+          .single()
+        return { data, error }
+      } catch (e) {
+        return { data: null, error: e.message || 'Not authenticated' }
+      }
     }
   }
 }

@@ -1,0 +1,283 @@
+/* ========================================
+   TEXT IMPROVER - AMÉLIORATION TEXTE IA
+   Correction orthographe pour techniciens
+   ======================================== */
+
+.text-improver {
+  width: 100%;
+  margin-bottom: 16px;
+}
+
+/* Mode édition normale */
+.text-improver-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.text-improver-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.text-improver-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: #2c2c2c;
+}
+
+.improve-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background: linear-gradient(135deg, #0066cc 0%, #0052a3 100%);
+  color: #ffffff;
+  border: none;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  box-shadow: 0 2px 8px rgba(0, 102, 204, 0.2);
+}
+
+.improve-btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 102, 204, 0.3);
+}
+
+.improve-btn:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.improve-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.improve-btn .spinner {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.text-improver-textarea {
+  width: 100%;
+  padding: 12px 16px;
+  border: 2px solid #e5e7eb;
+  border-radius: 8px;
+  font-size: 14px;
+  font-family: inherit;
+  line-height: 1.6;
+  resize: vertical;
+  transition: all 0.2s ease;
+}
+
+.text-improver-textarea:focus {
+  outline: none;
+  border-color: #0066cc;
+  box-shadow: 0 0 0 3px rgba(0, 102, 204, 0.1);
+}
+
+.text-improver-textarea:disabled {
+  background: #f8f9fa;
+  cursor: not-allowed;
+}
+
+.text-improver-hint {
+  font-size: 12px;
+  color: #666;
+  padding: 8px 12px;
+  background: #f0f9ff;
+  border-left: 3px solid #0066cc;
+  border-radius: 4px;
+}
+
+/* Mode comparaison */
+.text-improver-comparison {
+  background: #ffffff;
+  border: 2px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 20px;
+  animation: slideIn 0.3s ease;
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateY(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.comparison-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 2px solid #e5e7eb;
+}
+
+.comparison-header h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: #2c2c2c;
+}
+
+.comparison-stats {
+  display: flex;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.comparison-stats span {
+  padding: 4px 8px;
+  background: #f8f9fa;
+  border-radius: 4px;
+  color: #666;
+  font-weight: 600;
+}
+
+.comparison-grid {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.comparison-col {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.comparison-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.comparison-text {
+  padding: 16px;
+  border-radius: 8px;
+  font-size: 14px;
+  line-height: 1.6;
+  min-height: 150px;
+  max-height: 300px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.comparison-text.original {
+  background: #fff3cd;
+  border: 2px solid #ffc107;
+  color: #856404;
+}
+
+.comparison-text.improved {
+  background: #d1f2eb;
+  border: 2px solid #28a745;
+  color: #155724;
+}
+
+.comparison-arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #0066cc;
+}
+
+.comparison-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  padding-top: 16px;
+  border-top: 1px solid #e5e7eb;
+}
+
+.btn-reject,
+.btn-accept {
+  padding: 10px 24px;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-reject {
+  background: #f8f9fa;
+  color: #666;
+  border: 2px solid #e5e7eb;
+}
+
+.btn-reject:hover {
+  background: #e5e7eb;
+  border-color: #d0d0d0;
+}
+
+.btn-accept {
+  background: linear-gradient(135deg, #28a745 0%, #218838 100%);
+  color: #ffffff;
+  box-shadow: 0 2px 8px rgba(40, 167, 69, 0.3);
+}
+
+.btn-accept:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(40, 167, 69, 0.4);
+}
+
+.btn-accept:active {
+  transform: translateY(0);
+}
+
+/* Responsive - Mobile */
+@media (max-width: 768px) {
+  .comparison-grid {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .comparison-arrow {
+    transform: rotate(90deg);
+  }
+
+  .text-improver-header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+  }
+
+  .improve-btn {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .comparison-actions {
+    flex-direction: column;
+  }
+
+  .btn-reject,
+  .btn-accept {
+    width: 100%;
+  }
+}

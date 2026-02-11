@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback, useImperativeHandle, forwardRef } from 'react';
+import ReactDOM from 'react-dom';
 import axios from 'axios';
 import PlanningManagement from './PlanningComponent';
+import InventoryScanner from './InventoryScanner';
 import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom';
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
 import './App.css';
@@ -12,6 +14,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs';
 import { Select, SelectTrigger, SelectContent, SelectItem, SelectValue } from './components/ui/select';
 import { Badge } from './components/ui/badge';
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from './components/ui/dialog';
+// Import AI Orb - Premier Logiciel BTP Intelligent en France
+import AIOrb from './components/AIOrb/AIOrb';
 
 import {
   AlertCircle,
@@ -27,21 +31,32 @@ import {
   Check,
   CheckCheck,
   CheckCircle,
+  CheckCircle2,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   ChevronUp,
   ClipboardList,
   Clock,
   DollarSign,
   Download,
   Edit,
+  Edit2,
   Eye,
   FileBarChart,
   FileText,
   Filter,
+  FolderOpen,
   Globe,
+  Grid,
   GripVertical,
   History,
+  Image as ImageIcon,
+  Info,
+  Kanban,
+  Layers,
   Lightbulb,
+  List,
   Loader2,
   LogOut,
   Mail,
@@ -49,9 +64,12 @@ import {
   MapPin,
   MapPin as MapPinIcon,
   Menu,
+  MoreVertical,
+  Navigation,
   Phone,
   Play,
   Plus,
+  Package,
   Save,
   Search,
   Settings,
@@ -59,11 +77,15 @@ import {
   Shield,
   Star,
   Target,
+  Timer,
   Trash2,
+  TrendingUp,
+  Upload,
   User,
   UserPlus,
   Users,
   Wifi,
+  Wrench,
   X,
   XCircle
 } from 'lucide-react';
@@ -71,8 +93,47 @@ import {
 // Backend URL and API base with safe fallbacks
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'http://127.0.0.1:8001';
 const API = process.env.REACT_APP_API_BASE_URL || `${BACKEND_URL}/api`;
+const SUPABASE_URL = process.env.REACT_APP_SUPABASE_URL || 'https://izkhlqbhdxyjigdmjqvx.supabase.co';
 
-const FOUNDER_EMAIL = (process.env.REACT_APP_FOUNDER_EMAIL || 'skyapp@gmail.com').toLowerCase();
+const FOUNDER_EMAIL = (process.env.REACT_APP_FOUNDER_EMAIL || 'contact@skyapp.fr').toLowerCase();
+
+// Debug mode (désactivé en production)
+const DEBUG_MODE = process.env.NODE_ENV === 'development' && process.env.REACT_APP_DEBUG === 'true';
+
+// Fonction pour nettoyer le formatage Markdown des observations
+const cleanObservations = (text) => {
+  if (!text) return '';
+  
+  // Si c'est du JSON avec customSections, extraire uniquement le texte
+  try {
+    const data = JSON.parse(text);
+    if (data && typeof data === 'object' && 'text' in data) {
+      return data.text || '';
+    }
+  } catch (e) {
+    // Pas du JSON, continuer avec le nettoyage classique
+  }
+  
+  // Enlever les **text:** et garder seulement le contenu après
+  return text
+    .replace(/\*\*[^:]+:\*\*/g, '') // Enlever **titre:**
+    .replace(/\*\*[^*]+\*\*/g, '') // Enlever **texte**
+    .replace(/\s+/g, ' ') // Remplacer multiples espaces par un seul
+    .trim();
+};
+
+// Restaurer la session Supabase au démarrage (pour les appels directs: materials, etc.)
+(async () => {
+  const token = localStorage.getItem('token');
+  const refreshToken = localStorage.getItem('refresh_token');
+  if (token && refreshToken) {
+    try {
+      await supabase.auth.setSession({ access_token: token, refresh_token: refreshToken });
+    } catch (e) {
+      console.warn('Session Supabase non restaurée:', e);
+    }
+  }
+})();
 
 // Configure axios interceptor to add token to all requests
 axios.interceptors.request.use(
@@ -91,13 +152,46 @@ axios.interceptors.request.use(
 // Configure axios interceptor to handle 401 errors (token expiry)
 axios.interceptors.response.use(
   (response) => response,
-  (error) => {
-    if (error.response?.status === 401) {
-      // Token expiré ou invalide, déconnecter l'utilisateur
+  async (error) => {
+    const originalRequest = error.config;
+    
+    if (error.response?.status === 401 && !originalRequest._retry) {
+      originalRequest._retry = true;
+      
+      // Essayer de rafraîchir le token
+      const refreshToken = localStorage.getItem('refresh_token');
+      
+      if (refreshToken) {
+        try {
+          const response = await axios.post(`${API}/auth/refresh`, { refresh_token: refreshToken });
+          const { access_token, refresh_token: newRefreshToken } = response.data;
+          
+          // Mettre à jour les tokens
+          localStorage.setItem('token', access_token);
+          if (newRefreshToken) {
+            localStorage.setItem('refresh_token', newRefreshToken);
+          }
+
+          // Mettre à jour la session Supabase aussi
+          try {
+            await supabase.auth.setSession({ access_token, refresh_token: newRefreshToken || refreshToken });
+          } catch (e) { console.warn('Refresh session Supabase:', e); }
+          
+          // Réessayer la requête originale avec le nouveau token
+          originalRequest.headers['Authorization'] = `Bearer ${access_token}`;
+          return axios(originalRequest);
+        } catch (refreshError) {
+          // Le refresh a échoué, déconnecter l'utilisateur
+          console.error('Impossible de rafraîchir le token:', refreshError);
+        }
+      }
+      
+      // Token expiré et impossible de rafraîchir, déconnecter l'utilisateur
       const currentPath = window.location.pathname;
-      // Ne rediriger que si on n'est pas déjà sur la page d'accueil
       if (currentPath !== '/') {
+        alert('Votre session a expiré. Veuillez vous reconnecter.');
         localStorage.removeItem('token');
+        localStorage.removeItem('refresh_token');
         localStorage.removeItem('user');
         delete axios.defaults.headers.common['Authorization'];
         window.location.href = '/';
@@ -151,7 +245,7 @@ const useFounderOverview = () => {
 };
 
 // Real-time Statistics Hook (avec filtre entreprise pour fondateur)
-const useRealTimeStats = (companyFilter = null) => {
+const useRealTimeStats = (companyFilter = null, enabled = true) => {
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState(null);
@@ -167,6 +261,23 @@ const useRealTimeStats = (companyFilter = null) => {
   }), []);
 
   const fetchStats = React.useCallback(async () => {
+    // Si le hook est désactivé, ne rien faire
+    if (!enabled) {
+      setStats(fallback);
+      setLoading(false);
+      setError(null);
+      return;
+    }
+    
+    // Vérifier si l'utilisateur est connecté
+    const token = localStorage.getItem('token');
+    if (!token) {
+      setStats(fallback);
+      setLoading(false);
+      setError(null);
+      return;
+    }
+
     setLoading(true);
     try {
       const url = companyFilter ? `${API}/founder/overview?company=${companyFilter}` : `${API}/founder/overview`;
@@ -175,12 +286,15 @@ const useRealTimeStats = (companyFilter = null) => {
       setLastUpdated(new Date());
       setError(null);
     } catch (err) {
-      console.error('Erreur chargement statistiques:', err);
-      setStats(prev => prev ?? fallback);
       const status = err?.response?.status;
-      if (status === 403) {
+      setStats(prev => prev ?? fallback);
+      
+      if (status === 403 || status === 401) {
+        // Accès refusé ou non autorisé - normal si pas fondateur ou pas connecté
         setError(null);
       } else {
+        // Autres erreurs (réseau, serveur, etc.)
+        console.error('Erreur chargement statistiques:', err);
         setError('Impossible de charger les statistiques');
       }
       setLastUpdated(new Date());
@@ -190,27 +304,123 @@ const useRealTimeStats = (companyFilter = null) => {
   }, [companyFilter, fallback]);
 
   useEffect(() => {
+    if (!enabled) return;
     fetchStats();
     const interval = setInterval(fetchStats, 60000);
     return () => clearInterval(interval);
-  }, [fetchStats]);
+  }, [fetchStats, enabled]);
 
   return { stats, loading, error, lastUpdated, refresh: fetchStats };
 };
 
-// User Profile Modal Component
-const UserProfileModal = ({ user, isOpen, onClose }) => {
+// User Profile Modal Component (Editable)
+const UserProfileModal = ({ user, isOpen, onClose, onUpdate }) => {
+  const [isEditing, setIsEditing] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [profileData, setProfileData] = useState({
+    first_name: '',
+    last_name: '',
+    phone: '',
+    address: '',
+    company_name: ''
+  });
+
+  useEffect(() => {
+    if (user && isOpen) {
+      // Charger le profil depuis l'API
+      axios.get(`${API}/users/me`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+      })
+      .then(response => {
+        setProfileData({
+          first_name: response.data.first_name || '',
+          last_name: response.data.last_name || '',
+          phone: response.data.phone || '',
+          address: response.data.address || '',
+          company_name: response.data.company_name || ''
+        });
+      })
+      .catch(err => console.error('Erreur chargement profil:', err));
+    }
+  }, [user, isOpen]);
+
+  const handleSave = async () => {
+    setLoading(true);
+    try {
+      // Filtrer les champs vides
+      let dataToSend = Object.fromEntries(
+        Object.entries(profileData).filter(([_, value]) => value && value.trim() !== '')
+      );
+      
+      // Si l'utilisateur n'est pas ADMIN, ne pas envoyer company_name
+      if (user?.role !== 'ADMIN' && 'company_name' in dataToSend) {
+        const { company_name, ...rest } = dataToSend;
+        dataToSend = rest;
+      }
+      
+      const response = await axios.put(`${API}/users/me`, dataToSend, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+      });
+      
+      // Recharger le profil mis à jour depuis l'API
+      const updatedProfile = await axios.get(`${API}/users/me`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+      });
+      
+      // Mettre à jour le localStorage et le state parent
+      localStorage.setItem('user', JSON.stringify(updatedProfile.data));
+      if (onUpdate) {
+        onUpdate(updatedProfile.data);
+      }
+      
+      setIsEditing(false);
+      alert('Profil mis à jour avec succès !');
+    } catch (error) {
+      alert('Erreur lors de la mise à jour du profil');
+      console.error(error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   return (
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle className="flex items-center space-x-3">
-            <div className="w-12 h-12 bg-gradient-to-r from-blue-500 to-purple-600 rounded-full flex items-center justify-center">
-              <span className="text-white font-bold text-lg">
-                {user?.nom?.[0]}{user?.prenom?.[0]}
-              </span>
+          <DialogTitle className="flex items-center justify-between">
+            <div className="flex items-center space-x-3">
+              <div className="w-12 h-12 bg-gradient-to-r from-blue-500 to-purple-600 rounded-full flex items-center justify-center">
+                <span className="text-white font-bold text-lg">
+                  {(() => {
+                    const firstName = profileData.first_name || user?.first_name || user?.prenom || '';
+                    const lastName = profileData.last_name || user?.last_name || user?.nom || '';
+                    const initials = `${firstName.charAt(0)}${lastName.charAt(0)}`.toUpperCase();
+                    return initials || user?.email?.charAt(0)?.toUpperCase() || 'U';
+                  })()}
+                </span>
+              </div>
+              <div>
+                <span className="font-semibold">Profil Utilisateur</span>
+                {user?.is_fondateur && (
+                  <span className="ml-2 px-2 py-1 text-xs font-bold rounded-full bg-black text-white border-2 border-gray-900">
+                    FONDATEUR
+                  </span>
+                )}
+                <span className={`ml-2 px-2 py-0.5 text-xs font-medium rounded-full ${
+                  user?.role?.toUpperCase() === 'ADMIN' ? 'bg-red-100 text-red-700' :
+                  user?.role?.toUpperCase() === 'BUREAU' ? 'bg-blue-100 text-blue-700' :
+                  'bg-gray-100 text-gray-700'
+                }`}>
+                  {user?.role?.toUpperCase() === 'ADMIN' ? 'Admin' : user?.role?.toUpperCase() === 'BUREAU' ? 'Bureau' : 'User'}
+                </span>
+              </div>
             </div>
-            <span>Profil Utilisateur</span>
+            {!isEditing && (
+              <Button variant="outline" size="sm" onClick={() => setIsEditing(true)}>
+                <Edit className="h-4 w-4 mr-1" />
+                Modifier
+              </Button>
+            )}
           </DialogTitle>
         </DialogHeader>
         
@@ -218,11 +428,27 @@ const UserProfileModal = ({ user, isOpen, onClose }) => {
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="text-sm font-medium text-gray-600">Prénom</label>
-              <p className="font-semibold">{user?.prenom || 'Non renseigné'}</p>
+              {isEditing ? (
+                <Input
+                  value={profileData.first_name}
+                  onChange={(e) => setProfileData({...profileData, first_name: e.target.value})}
+                  placeholder="Votre prénom"
+                />
+              ) : (
+                <p className="font-semibold">{profileData.first_name || 'Non renseigné'}</p>
+              )}
             </div>
             <div>
               <label className="text-sm font-medium text-gray-600">Nom</label>
-              <p className="font-semibold">{user?.nom || 'Non renseigné'}</p>
+              {isEditing ? (
+                <Input
+                  value={profileData.last_name}
+                  onChange={(e) => setProfileData({...profileData, last_name: e.target.value})}
+                  placeholder="Votre nom"
+                />
+              ) : (
+                <p className="font-semibold">{profileData.last_name || 'Non renseigné'}</p>
+              )}
             </div>
           </div>
           
@@ -233,12 +459,28 @@ const UserProfileModal = ({ user, isOpen, onClose }) => {
           
           <div>
             <label className="text-sm font-medium text-gray-600">Téléphone</label>
-            <p className="font-semibold">{user?.telephone || 'Non renseigné'}</p>
+            {isEditing ? (
+              <Input
+                value={profileData.phone}
+                onChange={(e) => setProfileData({...profileData, phone: e.target.value})}
+                placeholder="Votre numéro"
+              />
+            ) : (
+              <p className="font-semibold">{profileData.phone || 'Non renseigné'}</p>
+            )}
           </div>
           
           <div>
             <label className="text-sm font-medium text-gray-600">Adresse</label>
-            <p className="font-semibold">{user?.adresse || 'Non renseigné'}</p>
+            {isEditing ? (
+              <Input
+                value={profileData.address}
+                onChange={(e) => setProfileData({...profileData, address: e.target.value})}
+                placeholder="Votre adresse"
+              />
+            ) : (
+              <p className="font-semibold">{profileData.address || 'Non renseigné'}</p>
+            )}
           </div>
           
           <div>
@@ -253,8 +495,27 @@ const UserProfileModal = ({ user, isOpen, onClose }) => {
           
           <div>
             <label className="text-sm font-medium text-gray-600">Entreprise</label>
-            <p className="font-semibold">{user?.entreprise || 'Non renseigné'}</p>
+            {isEditing && user?.role === 'ADMIN' ? (
+              <Input
+                value={profileData.company_name}
+                onChange={(e) => setProfileData({...profileData, company_name: e.target.value})}
+                placeholder="Nom de l'entreprise"
+              />
+            ) : (
+              <p className="font-semibold">{profileData.company_name || user?.entreprise || 'Non renseigné'}</p>
+            )}
           </div>
+
+          {isEditing && (
+            <div className="flex gap-2 pt-4">
+              <Button onClick={handleSave} disabled={loading} className="flex-1">
+                {loading ? 'Sauvegarde...' : 'Sauvegarder'}
+              </Button>
+              <Button variant="outline" onClick={() => setIsEditing(false)} className="flex-1">
+                Annuler
+              </Button>
+            </div>
+          )}
         </div>
       </DialogContent>
     </Dialog>
@@ -449,14 +710,17 @@ const LandingPage = () => {
   // Filtre entreprise pour le fondateur
   const [selectedCompany, setSelectedCompany] = useState(null);
   const [companies, setCompanies] = useState([]);
-  const { stats, loading } = useRealTimeStats(selectedCompany);
   
   // Check if user is logged in
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [user, setUser] = useState(null);
   const founderEmail = FOUNDER_EMAIL;
-  const isFounder = (user?.is_founder === true) || ((user?.email || '').toLowerCase() === founderEmail);
+  const isFounder = (user?.is_fondateur === true) || ((user?.email || '').toLowerCase() === founderEmail);
   const isAdmin = isFounder || (user?.role === 'ADMIN');
+  
+  // Ne charger les stats que pour les fondateurs
+  const shouldLoadStats = isFounder && isLoggedIn;
+  const { stats, loading } = useRealTimeStats(selectedCompany, shouldLoadStats);
 
   useEffect(() => {
     const token = localStorage.getItem('token');
@@ -464,6 +728,16 @@ const LandingPage = () => {
     if (token && userData) {
       setIsLoggedIn(true);
       setUser(JSON.parse(userData));
+      
+      // Recharger le profil depuis l'API pour avoir les données à jour
+      axios.get(`${API}/users/me`, {
+        headers: { Authorization: `Bearer ${token}` }
+      })
+      .then(response => {
+        setUser(response.data);
+        localStorage.setItem('user', JSON.stringify(response.data));
+      })
+      .catch(err => console.error('Erreur rechargement profil:', err));
     }
 
     const handleScroll = () => setScrollY(window.scrollY);
@@ -753,11 +1027,16 @@ const LandingPage = () => {
                   className="flex items-center space-x-3 hover:bg-gray-100 rounded-lg p-2 transition-colors"
                 >
                   <div className="w-8 h-8 bg-gradient-to-r from-gray-800 to-black rounded-full flex items-center justify-center text-white font-medium text-sm">
-                    {user?.prenom?.charAt(0) || 'U'}
+                    {(() => {
+                      const firstName = user?.first_name || user?.prenom || '';
+                      const lastName = user?.last_name || user?.nom || '';
+                      const initials = `${firstName.charAt(0)}${lastName.charAt(0)}`.toUpperCase();
+                      return initials || user?.email?.charAt(0)?.toUpperCase() || 'U';
+                    })()}
                   </div>
                   <div className="hidden md:block text-sm">
                     <span className="font-medium text-gray-900">
-                      {user?.prenom} {user?.nom}
+                      {user?.first_name || user?.prenom} {user?.last_name || user?.nom}
                     </span>
                   </div>
                 </button>
@@ -838,11 +1117,11 @@ const LandingPage = () => {
                   <div className="space-y-3">
                     <div className="flex items-center space-x-3 px-4 py-2">
                       <div className="w-8 h-8 bg-gray-900 rounded-full flex items-center justify-center text-white font-medium text-sm">
-                        {user?.prenom?.charAt(0) || 'U'}
+                        {(user?.first_name || user?.prenom)?.charAt(0) || 'U'}
                       </div>
                       <div>
                         <div className="text-sm font-medium text-gray-900">
-                          {user?.prenom} {user?.nom}
+                          {user?.first_name || user?.prenom} {user?.last_name || user?.nom}
                         </div>
                         <div className="text-xs text-gray-500">{user?.email}</div>
                       </div>
@@ -2098,6 +2377,7 @@ const LandingPage = () => {
         user={user}
         isOpen={showUserProfile}
         onClose={() => setShowUserProfile(false)}
+        onUpdate={(updatedUser) => setUser(updatedUser)}
       />
 
     </div>
@@ -2243,7 +2523,7 @@ const RoleSelection = () => {
   const [loadingInvites, setLoadingInvites] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
   const founderEmail = FOUNDER_EMAIL;
-  const isFounder = (user?.is_founder === true) || ((user?.email || '').toLowerCase() === founderEmail);
+  const isFounder = (user?.is_fondateur === true) || ((user?.email || '').toLowerCase() === founderEmail);
   const isAdmin = isFounder || (user?.role === 'ADMIN');
 
   useEffect(() => {
@@ -2421,10 +2701,26 @@ const RoleSelection = () => {
 
           {/* Role Cards */}
           <div className="space-y-4">
-            {/* Bloc Fondateur supprimé à la demande - l'accès /fondateur n'est plus proposé visuellement */}
+            {/* Badge Fondateur */}
+            {user?.is_fondateur && (
+              <div className="mb-6 p-4 bg-gradient-to-r from-gray-900 to-black border-2 border-gray-800 rounded-2xl shadow-lg">
+                <div className="flex items-center space-x-3">
+                  <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center border-2 border-gray-300">
+                    <Shield className="h-6 w-6 text-black" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-white flex items-center gap-2">
+                      FONDATEUR SKYAPP
+                      <span className="px-2 py-0.5 text-xs bg-white text-black rounded-full font-bold">Privilèges Maximum</span>
+                    </h4>
+                    <p className="text-sm text-gray-300">Accès complet à tout le système multi-tenant</p>
+                  </div>
+                </div>
+              </div>
+            )}
 
-            {/* Ancien bloc accès suprême spécifique remplacé par logique fondateur */}
-            {(!isFounder && user?.email === 'corradijordan@gmail.com') && (
+            {/* Badge Accès Admin */}
+            {isAdmin && !user?.is_fondateur && (
               <div className="mb-6 p-4 bg-gradient-to-r from-gray-50 to-gray-100 border border-gray-300 rounded-2xl">
                 <div className="flex items-center space-x-3">
                   <div className="w-10 h-10 bg-gray-900 rounded-xl flex items-center justify-center">
@@ -2433,6 +2729,21 @@ const RoleSelection = () => {
                   <div>
                     <h4 className="font-semibold text-gray-900">Accès Admin</h4>
                     <p className="text-sm text-gray-600">Tous les privilèges administrateur disponibles</p>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Badge Accès Bureau */}
+            {user?.role === 'BUREAU' && !isAdmin && (
+              <div className="mb-6 p-4 bg-gradient-to-r from-blue-50 to-blue-100 border border-blue-300 rounded-2xl">
+                <div className="flex items-center space-x-3">
+                  <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center">
+                    <Briefcase className="h-6 w-6 text-white" />
+                  </div>
+                  <div>
+                    <h4 className="font-semibold text-blue-900">Accès Bureau</h4>
+                    <p className="text-sm text-blue-700">Gestion administrative et planning</p>
                   </div>
                 </div>
               </div>
@@ -2465,7 +2776,9 @@ const RoleSelection = () => {
                           {inv.companies?.name || 'Entreprise'}
                         </div>
                         <div className="text-sm text-gray-600">
-                          Rôle proposé: <span className="font-medium">{inv.role === 'TECHNICIEN' ? 'Technicien / User' : inv.role}</span>
+                          Rôle proposé: <span className="font-medium">
+                            {inv.role === 'TECHNICIEN' ? 'Technicien / User' : inv.role === 'BUREAU' ? 'Bureau' : inv.role === 'ADMIN' ? 'Admin' : inv.role}
+                          </span>
                         </div>
                         <div className="text-xs text-gray-500 mt-1">
                           Envoyé le {new Date(inv.created_at).toLocaleDateString('fr-FR')}
@@ -2522,7 +2835,7 @@ const RoleSelection = () => {
               </div>
             </button>
 
-            {isAdmin && (
+            {(isAdmin || user?.role === 'BUREAU') && (
               <button
                 onClick={() => handleRoleSelect('bureau')}
                 className="w-full bg-white border border-gray-200 rounded-2xl p-6 text-left hover:border-gray-300 hover:shadow-sm transition-all duration-200 group"
@@ -2572,7 +2885,9 @@ const RoleSelection = () => {
             {/* Admin Panel réservé au Fondateur */}
             {isFounder && (
               <button
-                onClick={() => handleRoleSelect('admin')}
+                onClick={() => {
+                  navigate('/admin');
+                }}
                 className="w-full bg-gradient-to-r from-gray-800 to-gray-900 border-0 rounded-2xl p-6 text-left hover:from-gray-700 hover:to-gray-800 transition-all duration-200 group shadow-lg"
               >
                 <div className="flex items-center justify-between">
@@ -2596,11 +2911,299 @@ const RoleSelection = () => {
   );
 };
 
+// Menu de sélection du type de recherche
+const SearchTypeSelector = ({ onSelect, onCancel }) => {
+  const [pendingReportsCount, setPendingReportsCount] = useState(0);
+
+  useEffect(() => {
+    const fetchPendingReports = async () => {
+      try {
+        const token = localStorage.getItem('token');
+        // Récupérer les missions sans rapport
+        const response = await axios.get(`${API}/planning/my-missions`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const missions = response.data || [];
+        
+        // Récupérer tous les rapports existants
+        const reportsResponse = await axios.get(`${API}/searches`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        const reports = reportsResponse.data?.data || reportsResponse.data || [];
+        
+        // Compter les missions sans rapport (type 'rapport')
+        const missionReports = reports.filter(r => r.type === 'rapport' || r.search_type === 'rapport');
+        const missionsWithReports = new Set(missionReports.map(r => r.mission_id || r.worksite_id));
+        const missionsWithoutReports = missions.filter(m => !missionsWithReports.has(m.id));
+        
+        setPendingReportsCount(missionsWithoutReports.length);
+      } catch (error) {
+        console.error('Erreur chargement compteur rapports:', error);
+        setPendingReportsCount(0);
+      }
+    };
+    
+    fetchPendingReports();
+  }, []);
+
+  const searchTypes = [
+    {
+      id: 'rapport',
+      title: 'Compte-Rendu Chantier',
+      description: 'Créer un rapport d\'intervention pour une mission planifiée',
+      icon: ClipboardList,
+      gradient: 'from-green-500 to-green-600',
+      badge: pendingReportsCount.toString()
+    },
+    {
+      id: 'infiltration',
+      title: "Recherche d'Infiltration",
+      description: 'Test et détection des infiltrations d\'eau',
+      icon: Layers,
+      gradient: 'from-orange-500 to-orange-600',
+      badge: '0'
+    }
+  ];
+
+  return (
+    <div className="max-w-4xl mx-auto p-6">
+      <Card className="bg-white rounded-2xl border-0 shadow-lg">
+        <CardHeader className="pb-6 text-center">
+          <div className="w-16 h-16 bg-gradient-to-br from-gray-900 to-gray-700 rounded-xl flex items-center justify-center mx-auto mb-4">
+            <Search className="h-8 w-8 text-white" />
+          </div>
+          <CardTitle className="text-2xl font-semibold text-gray-900">
+            Choisir le type d'action
+          </CardTitle>
+          <CardDescription className="text-gray-600 mt-2">
+            Sélectionnez l'action que vous souhaitez effectuer
+          </CardDescription>
+        </CardHeader>
+
+        <CardContent className="space-y-4 pb-8">
+          {/* Options de recherche */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {searchTypes.map((type) => (
+              <button
+                key={type.id}
+                onClick={() => onSelect(type.id)}
+                className="group relative bg-white border-2 border-gray-200 hover:border-gray-900 rounded-2xl p-6 text-left transition-all duration-200 hover:shadow-xl"
+              >
+                {/* Badge compteur */}
+                <div className="absolute -top-2 -right-2 bg-orange-500 text-white text-xs font-bold rounded-full w-8 h-8 flex items-center justify-center shadow-lg">
+                  {type.badge}
+                </div>
+
+                {/* Icône */}
+                <div className={`w-14 h-14 bg-gradient-to-br ${type.gradient} rounded-xl flex items-center justify-center mb-4 group-hover:scale-110 transition-transform duration-200`}>
+                  <type.icon className="h-7 w-7 text-white" />
+                </div>
+
+                {/* Contenu */}
+                <h3 className="text-lg font-bold text-gray-900 mb-2 group-hover:text-gray-900">
+                  {type.title}
+                </h3>
+                <p className="text-sm text-gray-600 group-hover:text-gray-700">
+                  {type.description}
+                </p>
+
+                {/* Flèche */}
+                <div className="mt-4 flex items-center text-gray-400 group-hover:text-gray-900 transition-colors">
+                  <span className="text-sm font-medium">Continuer</span>
+                  <ArrowRight className="h-4 w-4 ml-2 group-hover:translate-x-1 transition-transform" />
+                </div>
+              </button>
+            ))}
+          </div>
+
+          {/* Bouton Annuler */}
+          <div className="pt-4 flex justify-center">
+            <Button
+              onClick={onCancel}
+              variant="ghost"
+              className="text-gray-500 hover:text-gray-700"
+            >
+              <X className="h-4 w-4 mr-2" />
+              Annuler
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+};
+
+// Composant de sélection de mission pour compte-rendu
+const MissionSelector = ({ onSelect, onCancel, token }) => {
+  const [missions, setMissions] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    const fetchMissions = async () => {
+      try {
+        setLoading(true);
+        // Récupérer les missions planifiées pour l'utilisateur
+        const response = await axios.get(`${API}/planning/my-missions`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        
+        // Regrouper les missions par titre et location pour éviter les doublons (missions multi-jours)
+        const missionsData = response.data || [];
+        const uniqueMissions = {};
+        
+        missionsData.forEach(mission => {
+          // Nettoyer le titre : retirer "RDV - Client" et autres préfixes
+          let cleanTitle = mission.title || '';
+          cleanTitle = cleanTitle.replace(/^RDV\s*-\s*Client\s*/i, '').trim();
+          
+          // Si le titre est vide ou générique, construire un titre pertinent
+          if (!cleanTitle || cleanTitle === 'Mission sans titre') {
+            // Utiliser description en priorité, sinon intervention_category, sinon "Chantier chez client"
+            if (mission.description) {
+              cleanTitle = mission.description;
+            } else if (mission.intervention_category) {
+              cleanTitle = mission.intervention_category.charAt(0).toUpperCase() + mission.intervention_category.slice(1);
+              if (mission.client_name) {
+                cleanTitle += ` - ${mission.client_name}`;
+              }
+            } else if (mission.client_name) {
+              cleanTitle = `Chantier chez ${mission.client_name}`;
+            } else {
+              cleanTitle = 'Chantier';
+            }
+          }
+          
+          // Créer une clé unique basée sur le titre nettoyé et la location
+          const key = `${cleanTitle}_${mission.location}`;
+          
+          // Garder uniquement la première occurrence de chaque mission
+          if (!uniqueMissions[key]) {
+            uniqueMissions[key] = {
+              ...mission,
+              title: cleanTitle
+            };
+          }
+        });
+        
+        setMissions(Object.values(uniqueMissions));
+      } catch (err) {
+        console.error('Erreur chargement missions:', err);
+        setError('Impossible de charger les missions');
+      } finally {
+        setLoading(false);
+      }
+    };
+    
+    fetchMissions();
+  }, [token]);
+
+  return (
+    <div className="max-w-5xl mx-auto p-6">
+      <Card className="bg-white rounded-2xl border-0 shadow-lg">
+        <CardHeader className="pb-6 text-center">
+          <div className="w-16 h-16 bg-gradient-to-br from-green-500 to-green-600 rounded-xl flex items-center justify-center mx-auto mb-4">
+            <Calendar className="h-8 w-8 text-white" />
+          </div>
+          <CardTitle className="text-2xl font-semibold text-gray-900">
+            Sélectionner un chantier
+          </CardTitle>
+          <CardDescription className="text-gray-600 mt-2">
+            Choisissez le chantier pour lequel créer un compte-rendu
+          </CardDescription>
+        </CardHeader>
+
+        <CardContent className="space-y-4 pb-8">
+          {loading ? (
+            <div className="flex justify-center py-12">
+              <Loader2 className="h-8 w-8 animate-spin text-green-500" />
+            </div>
+          ) : error ? (
+            <div className="text-center py-12">
+              <AlertCircle className="h-12 w-12 text-red-500 mx-auto mb-4" />
+              <p className="text-red-600">{error}</p>
+            </div>
+          ) : missions.length === 0 ? (
+            <div className="text-center py-12">
+              <Calendar className="h-12 w-12 text-gray-400 mx-auto mb-4" />
+              <p className="text-gray-600 mb-2">Aucune mission planifiée</p>
+              <p className="text-sm text-gray-500">Les missions planifiées apparaîtront ici</p>
+            </div>
+          ) : (
+            <div className="space-y-3 max-h-96 overflow-y-auto">
+              {missions.map((mission) => (
+                <button
+                  key={mission.id}
+                  onClick={() => onSelect(mission)}
+                  className="w-full bg-white border-2 border-gray-200 hover:border-green-500 rounded-xl p-4 text-left transition-all duration-200 hover:shadow-lg group"
+                >
+                  <div className="flex items-start justify-between">
+                    <div className="flex-1">
+                      <div className="flex items-center space-x-3 mb-2">
+                        <div className="w-10 h-10 bg-gradient-to-br from-green-500 to-green-600 rounded-lg flex items-center justify-center">
+                          <MapPin className="h-5 w-5 text-white" />
+                        </div>
+                        <div>
+                          <h3 className="text-lg font-bold text-gray-900 group-hover:text-green-600">
+                            {mission.title || 'Mission sans titre'}
+                          </h3>
+                          <p className="text-sm text-gray-500">{mission.location || 'Localisation non spécifiée'}</p>
+                        </div>
+                      </div>
+                      
+                      {mission.description && (
+                        <p className="text-sm text-gray-600 ml-13 mb-2">{mission.description}</p>
+                      )}
+                      
+                      <div className="flex items-center space-x-4 ml-13 text-xs text-gray-500">
+                        {mission.date && (
+                          <span className="flex items-center">
+                            <Calendar className="h-3 w-3 mr-1" />
+                            {new Date(mission.date).toLocaleDateString('fr-FR')}
+                          </span>
+                        )}
+                        {mission.client_name && (
+                          <span className="flex items-center">
+                            <User className="h-3 w-3 mr-1" />
+                            {mission.client_name}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    
+                    <ArrowRight className="h-5 w-5 text-gray-400 group-hover:text-green-600 group-hover:translate-x-1 transition-all ml-4 mt-1" />
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Bouton Annuler */}
+          <div className="pt-4 flex justify-center">
+            <Button
+              onClick={onCancel}
+              variant="ghost"
+              className="text-gray-500 hover:text-gray-700"
+            >
+              <X className="h-4 w-4 mr-2" />
+              Annuler
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+};
+
 // Apple-style Main Layout for Technicien with Back Button
 const TechnicienLayout = () => {
   const navigate = useNavigate();
   const { user, token } = useAuth();
   const [activeTab, setActiveTab] = useState('search');
+  const [showSearchTypeSelector, setShowSearchTypeSelector] = useState(false);
+  const [showMissionSelector, setShowMissionSelector] = useState(false);
+  const [selectedSearchType, setSelectedSearchType] = useState(null);
+  const [selectedMission, setSelectedMission] = useState(null);
   const searchFormRef = useRef(null);
   const [drafts, setDrafts] = useState([]);
   const [draftsLoading, setDraftsLoading] = useState(false);
@@ -2608,6 +3211,9 @@ const TechnicienLayout = () => {
   const [showDraftModal, setShowDraftModal] = useState(false);
   const [discardingDraftId, setDiscardingDraftId] = useState(null);
   const [isTabTransitioning, setIsTabTransitioning] = useState(false);
+  const [searchToEdit, setSearchToEdit] = useState(null);
+  // Set partagé pour tracker les recherches récemment finalisées
+  const recentlyFinalizedRef = useRef(new Set());
 
   const handleLogout = () => {
     localStorage.removeItem('token');
@@ -2637,12 +3243,37 @@ const TechnicienLayout = () => {
         params: { status: 'DRAFT', page: 1, page_size: 50, sort_by: 'updated_at', sort_dir: 'desc' },
         headers: { Authorization: `Bearer ${authToken}` }
       });
-      // Accepte format paginé ou liste brute
-      if (Array.isArray(response.data)) {
-        setDrafts(response.data);
-      } else {
-        setDrafts(response.data.items || []);
-      }
+      // Format standardisé : { data: [...] } ou { data: [...], page: ..., has_more: ... }
+      // Filtre de sécurité : ne jamais afficher les recherches ACTIVE/SHARED dans les brouillons
+      const allSearches = response.data.data || [];
+      if (DEBUG_MODE) console.log('📊 [Brouillons] Recherches reçues du backend:', allSearches.map(s => ({ location: s.location, status: s.status })));
+      
+      // Double filtrage : 
+      // 1. Status doit être DRAFT
+      // 2. Ne doit PAS être dans la liste des recherches récemment finalisées
+      if (DEBUG_MODE) console.log('🔍 [Brouillons] Set de finalisées:', Array.from(recentlyFinalizedRef.current));
+      const draftsOnly = allSearches.filter(search => {
+        const isDraft = search.status === 'DRAFT';
+        const isInFinalizedSet = recentlyFinalizedRef.current.has(search.id);
+        const notRecentlyFinalized = !isInFinalizedSet;
+        
+        if (DEBUG_MODE) {
+          console.log(`🔎 [Brouillons] Recherche ${search.id}:`, { 
+            status: search.status, 
+            isDraft, 
+            isInFinalizedSet,
+            willBeIncluded: isDraft && notRecentlyFinalized 
+          });
+          
+          if (isDraft && !notRecentlyFinalized) {
+            console.log('🚫 [Brouillons] Exclusion de', search.id, '(récemment finalisée)');
+          }
+        }
+        return isDraft && notRecentlyFinalized;
+      });
+      
+      if (DEBUG_MODE) console.log('✅ [Brouillons] Après filtrage DRAFT uniquement:', draftsOnly.length, 'brouillons');
+      setDrafts(draftsOnly);
     } catch (error) {
       console.error('Erreur lors du chargement des brouillons:', error);
       setDraftError('Impossible de charger les brouillons.');
@@ -2663,17 +3294,50 @@ const TechnicienLayout = () => {
     }
   }, [activeTab]);
 
+  // Écouter l'événement de finalisation pour basculer vers "Mes Recherches"
+  useEffect(() => {
+    const handleSearchFinalized = (event) => {
+      if (DEBUG_MODE) {
+        console.log('🔔 [TechnicienLayout] Événement searchFinalized reçu!', event.detail);
+        console.log('🔄 Bascule vers l\'onglet "Mes Recherches"...');
+      }
+      setActiveTab('history');
+    };
+    
+    if (DEBUG_MODE) console.log('✅ [TechnicienLayout] Écouteur d\'événement searchFinalized installé');
+    window.addEventListener('searchFinalized', handleSearchFinalized);
+    return () => {
+      if (DEBUG_MODE) console.log('❌ [TechnicienLayout] Écouteur d\'événement searchFinalized retiré');
+      window.removeEventListener('searchFinalized', handleSearchFinalized);
+    };
+  }, []);
+
   const handleDraftEvent = useCallback((event) => {
     if (!event) return;
-  const impactfulTypes = new Set(['created', 'saved', 'finalized', 'discarded']);
+    
+    if (event.type === 'finalized') {
+      // Retirer immédiatement la recherche finalisée de la liste des brouillons
+      setDrafts(prevDrafts => prevDrafts.filter(draft => draft.id !== event.draftId));
+      if (DEBUG_MODE) console.log(`🗑️ Brouillon ${event.draftId} retiré de la liste après finalisation`);
+      return;
+    }
+    
+    const impactfulTypes = new Set(['created', 'saved', 'discarded']);
     if (impactfulTypes.has(event.type)) {
       refreshDrafts({ silent: true });
     }
   }, [refreshDrafts]);
 
-  const openDraftModal = useCallback(() => {
-    setShowDraftModal(true);
-  }, []);
+  const openDraftModal = useCallback(async () => {
+    // Rafraîchir la liste avant d'ouvrir pour avoir les dernières données
+    if (DEBUG_MODE) console.log('🔄 [openDraftModal] Rafraîchissement des brouillons avant ouverture...');
+    await refreshDrafts();
+    // Petit délai pour laisser le state se mettre à jour
+    setTimeout(() => {
+      if (DEBUG_MODE) console.log('✅ [openDraftModal] Ouverture de la modal avec données à jour');
+      setShowDraftModal(true);
+    }, 300);
+  }, [refreshDrafts]);
 
   const closeDraftModal = useCallback(() => {
     setShowDraftModal(false);
@@ -2689,19 +3353,63 @@ const TechnicienLayout = () => {
   }, [showDraftModal, refreshDrafts]);
 
   const resumeDraft = useCallback(async (draft) => {
-    if (!draft) return;
+    if (!draft) {
+      if (DEBUG_MODE) console.log('❌ [resumeDraft] Pas de brouillon fourni');
+      return;
+    }
+    
+    if (DEBUG_MODE) console.log('🔄 [resumeDraft] Reprise du brouillon:', draft.id);
     setShowDraftModal(false);
-    setActiveTab('search');
+    
+    // Restaurer le type de recherche AVANT de basculer vers l'onglet search
+    // Mapper l'ancien type 'terrain' vers 'infiltration' car 'rapport' nécessite une mission
+    let searchType = draft.search_type?.toLowerCase() || 'infiltration';
+    if (searchType === 'terrain') {
+      searchType = 'infiltration'; // Migration: anciens brouillons terrain deviennent infiltration
+    }
+    if (DEBUG_MODE) console.log('📋 [resumeDraft] Type de recherche:', searchType);
+    
     // Récupération fraîche du draft depuis l'API pour éviter les données périmées
     try {
       const authToken = token || localStorage.getItem('token');
+      if (DEBUG_MODE) console.log('🌐 [resumeDraft] Chargement depuis l\'API...');
       const resp = await axios.get(`${API}/searches/${draft.id}`, {
         headers: { Authorization: `Bearer ${authToken}` }
       });
-      searchFormRef.current?.loadDraft?.(resp.data || draft);
+      if (DEBUG_MODE) console.log('✅ [resumeDraft] Brouillon chargé depuis l\'API:', resp.data);
+      
+      // Mettre à jour le type de recherche depuis la réponse API si disponible
+      if (resp.data?.search_type) {
+        searchType = resp.data.search_type.toLowerCase();
+        // Mapper l'ancien type 'terrain' vers 'infiltration'
+        if (searchType === 'terrain') {
+          searchType = 'infiltration';
+        }
+      }
+      
+      // Définir le type AVANT de basculer vers l'onglet
+      setSelectedSearchType(searchType);
+      
+      // Petit délai pour laisser React monter le formulaire
+      setTimeout(() => {
+        setActiveTab('search');
+        // Attendre que le formulaire soit monté avant de charger les données
+        setTimeout(() => {
+          if (DEBUG_MODE) console.log('📤 [resumeDraft] Chargement des données dans le formulaire...');
+          searchFormRef.current?.loadDraft?.(resp.data || draft);
+        }, 100);
+      }, 50);
+      
     } catch (e) {
+      console.error('❌ [resumeDraft] Erreur chargement API:', e);
       // En cas d'erreur réseau, on retombe sur la version passée en paramètre
-      searchFormRef.current?.loadDraft?.(draft);
+      setSelectedSearchType(searchType);
+      setTimeout(() => {
+        setActiveTab('search');
+        setTimeout(() => {
+          searchFormRef.current?.loadDraft?.(draft);
+        }, 100);
+      }, 50);
     }
   }, [token]);
 
@@ -2737,6 +3445,10 @@ const TechnicienLayout = () => {
     }
     const applyChange = () => {
       setActiveTab(value);
+      // Reset search type when leaving search tab
+      if (activeTab === 'search' && value !== 'search') {
+        setSelectedSearchType(null);
+      }
       if (value === 'search') {
         refreshDrafts({ silent: true });
       }
@@ -2892,18 +3604,49 @@ const TechnicienLayout = () => {
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto py-8 px-6">
-        <Tabs value={activeTab} onValueChange={handleTabChange}>
-          {/* Apple-style Tab Navigation */}
-          <div className="flex justify-center mb-8">
-            <TabsList className="bg-white border border-gray-200 p-1 rounded-xl shadow-sm">
-              <TabsTrigger 
-                value="search" 
-                className="flex items-center space-x-2 px-6 py-3 rounded-lg data-[state=active]:bg-gray-100 data-[state=active]:shadow-sm transition-all duration-200"
-                disabled={isTabTransitioning}
-              >
-                <Search className="h-4 w-4" />
-                <span className="font-medium">Nouvelle Recherche</span>
-              </TabsTrigger>
+        {showMissionSelector ? (
+          <MissionSelector
+            token={token}
+            onSelect={(mission) => {
+              setSelectedMission(mission);
+              setShowMissionSelector(false);
+              setSelectedSearchType('rapport');
+              setActiveTab('search');
+            }}
+            onCancel={() => {
+              setShowMissionSelector(false);
+            }}
+          />
+        ) : showSearchTypeSelector ? (
+          <SearchTypeSelector
+            onSelect={(type) => {
+              if (type === 'rapport') {
+                // Pour compte-rendu, afficher d'abord le sélecteur de mission
+                setShowSearchTypeSelector(false);
+                setShowMissionSelector(true);
+              } else {
+                setSelectedSearchType(type);
+                setShowSearchTypeSelector(false);
+                setActiveTab('search');
+              }
+            }}
+            onCancel={() => {
+              setShowSearchTypeSelector(false);
+            }}
+          />
+        ) : (
+          <Tabs value={activeTab} onValueChange={handleTabChange}>
+            {/* Apple-style Tab Navigation */}
+            <div className="flex justify-center mb-8">
+              <TabsList className="bg-white border border-gray-200 p-1 rounded-xl shadow-sm">
+                <TabsTrigger 
+                  value="search" 
+                  className="flex items-center space-x-2 px-6 py-3 rounded-lg data-[state=active]:bg-gray-100 data-[state=active]:shadow-sm transition-all duration-200"
+                  disabled={isTabTransitioning}
+                >
+                  <Search className="h-4 w-4" />
+                  <span className="font-medium">Nouvelle Recherche</span>
+                </TabsTrigger>
               <TabsTrigger 
                 value="history" 
                 className="flex items-center space-x-2 px-6 py-3 rounded-lg data-[state=active]:bg-gray-100 data-[state=active]:shadow-sm transition-all duration-200"
@@ -2921,43 +3664,139 @@ const TechnicienLayout = () => {
                 <span className="font-medium">Mes Missions</span>
               </TabsTrigger>
               <TabsTrigger 
-                value="share" 
+                value="inventory" 
                 className="flex items-center space-x-2 px-6 py-3 rounded-lg data-[state=active]:bg-gray-100 data-[state=active]:shadow-sm transition-all duration-200"
                 disabled={isTabTransitioning}
               >
-                <Share2 className="h-4 w-4" />
-                <span className="font-medium">Partager PDF</span>
+                <Package className="h-4 w-4" />
+                <span className="font-medium">Inventaire</span>
               </TabsTrigger>
             </TabsList>
           </div>
 
           <TabsContent value="search" className="mt-8">
-            <SearchForm ref={searchFormRef} onDraftEvent={handleDraftEvent} />
+            {!selectedSearchType ? (
+              <SearchTypeSelector
+                onSelect={(type) => {
+                  if (type === 'rapport') {
+                    setSelectedSearchType('rapport');
+                    // Ne pas afficher immédiatement le form, attendre la sélection de mission
+                  } else {
+                    setSelectedSearchType(type);
+                  }
+                }}
+                onCancel={() => {
+                  setActiveTab('history');
+                }}
+              />
+            ) : selectedSearchType === 'rapport' && !selectedMission ? (
+              <MissionSelector
+                token={token}
+                onSelect={(mission) => {
+                  setSelectedMission(mission);
+                }}
+                onCancel={() => {
+                  setSelectedSearchType(null);
+                  setSelectedMission(null);
+                }}
+              />
+            ) : selectedSearchType === 'rapport' && selectedMission ? (
+              <MissionReportForm 
+                mission={selectedMission}
+                token={token}
+                onCancel={() => {
+                  setSelectedSearchType(null);
+                  setSelectedMission(null);
+                }}
+                onComplete={() => {
+                  setSelectedSearchType(null);
+                  setSelectedMission(null);
+                  setActiveTab('history');
+                }}
+              />
+            ) : (
+              <SearchForm 
+                ref={searchFormRef} 
+                onDraftEvent={handleDraftEvent} 
+                searchType={selectedSearchType}
+                initialSearch={searchToEdit}
+                onSearchLoaded={() => setSearchToEdit(null)}
+                recentlyFinalizedRef={recentlyFinalizedRef}
+              />
+            )}
           </TabsContent>
 
           <TabsContent value="history" className="mt-8">
-            <SearchHistory />
+            <SearchHistory 
+              onEditSearch={(search) => {
+                setSearchToEdit(search);
+                setActiveTab('search');
+                setSelectedSearchType('terrain');
+              }}
+            />
           </TabsContent>
 
           <TabsContent value="planning" className="mt-8">
             <TechnicianPlanning />
           </TabsContent>
 
-          <TabsContent value="share" className="mt-8">
-            <ShareSearch />
+          <TabsContent value="inventory" className="mt-8">
+            <InventoryScanner />
           </TabsContent>
         </Tabs>
+        )}
       </main>
     </div>
   );
 };
 
-// Technician Planning Component
+// Technician Planning Component - Vue Calendrier Hebdomadaire
 const TechnicianPlanning = () => {
   const [missions, setMissions] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [filterDate, setFilterDate] = useState('');
-  const [filterStatus, setFilterStatus] = useState('all');
+  const [currentWeekStart, setCurrentWeekStart] = useState(getWeekStart(new Date()));
+  const [selectedMission, setSelectedMission] = useState(null);
+  const [quoteData, setQuoteData] = useState(null);
+  const [loadingQuote, setLoadingQuote] = useState(false);
+  const [searchData, setSearchData] = useState(null);
+  const [showQuoteModal, setShowQuoteModal] = useState(false);
+  const [showSearchModal, setShowSearchModal] = useState(false);
+
+  // Obtenir le début de semaine (lundi)
+  function getWeekStart(date) {
+    const d = new Date(date);
+    const day = d.getDay();
+    const diff = d.getDate() - day + (day === 0 ? -6 : 1);
+    return new Date(d.setDate(diff));
+  }
+
+  // Obtenir les 7 jours de la semaine
+  const getWeekDays = () => {
+    const days = [];
+    for (let i = 0; i < 7; i++) {
+      const date = new Date(currentWeekStart);
+      date.setDate(currentWeekStart.getDate() + i);
+      days.push(date);
+    }
+    return days;
+  };
+
+  // Navigation semaine
+  const goToPreviousWeek = () => {
+    const newDate = new Date(currentWeekStart);
+    newDate.setDate(newDate.getDate() - 7);
+    setCurrentWeekStart(newDate);
+  };
+
+  const goToNextWeek = () => {
+    const newDate = new Date(currentWeekStart);
+    newDate.setDate(newDate.getDate() + 7);
+    setCurrentWeekStart(newDate);
+  };
+
+  const goToToday = () => {
+    setCurrentWeekStart(getWeekStart(new Date()));
+  };
 
   // Fetch missions where current user is assigned
   useEffect(() => {
@@ -2969,7 +3808,11 @@ const TechnicianPlanning = () => {
       const token = localStorage.getItem('token');
       if (!token) return;
 
-      const response = await axios.get(`${API}/schedules`, {
+      // Décoder le token pour obtenir l'ID du technicien
+      const payload = JSON.parse(atob(token.split('.')[1]));
+      const technicianId = payload.sub;
+
+      const response = await axios.get(`${API}/technicians/${technicianId}/missions`, {
         headers: { Authorization: `Bearer ${token}` }
       });
 
@@ -2985,20 +3828,220 @@ const TechnicianPlanning = () => {
 
   const getStatusColor = (status) => {
     switch (status) {
-      case 'PLANIFIE': return 'bg-blue-100 text-blue-700 border-blue-200';
-      case 'EN_COURS': return 'bg-orange-100 text-orange-700 border-orange-200';
-      case 'TERMINE': return 'bg-green-100 text-green-700 border-green-200';
-      case 'ANNULE': return 'bg-red-100 text-red-700 border-red-200';
-      default: return 'bg-gray-100 text-gray-700 border-gray-200';
+      case 'scheduled': return 'bg-blue-100 text-blue-700 border-blue-300';
+      case 'in_progress': return 'bg-orange-100 text-orange-700 border-orange-300';
+      case 'completed': return 'bg-green-100 text-green-700 border-green-300';
+      case 'cancelled': return 'bg-red-100 text-red-700 border-red-300';
+      default: return 'bg-gray-100 text-gray-700 border-gray-300';
     }
   };
 
-  const formatDate = (dateString) => {
-    return new Date(dateString).toLocaleDateString('fr-FR');
+  const getStatusLabel = (status) => {
+    switch (status) {
+      case 'scheduled': return 'Planifiée';
+      case 'in_progress': return 'En cours';
+      case 'completed': return 'Terminée';
+      case 'cancelled': return 'Annulée';
+      default: return status;
+    }
   };
 
   const formatTime = (timeString) => {
     return timeString ? timeString.substring(0, 5) : '';
+  };
+
+  // Obtenir toutes les missions de la semaine groupées par chantier
+  const getWeekMissionsGrouped = () => {
+    const grouped = [];
+    const processed = new Set();
+    const weekStart = getWeekStart(currentWeekStart);
+    weekStart.setHours(0, 0, 0, 0);
+    const weekEnd = new Date(weekStart);
+    weekEnd.setDate(weekEnd.getDate() + 6);
+    weekEnd.setHours(23, 59, 59, 999);
+
+    missions.forEach(mission => {
+      if (processed.has(mission.id)) return;
+      
+      // Debug: voir la structure des données
+      console.log('📋 Mission data:', {
+        id: mission.id,
+        worksites: mission.worksites,
+        clients: mission.worksites?.clients
+      });
+
+      processed.add(mission.id);
+
+      // Utiliser start_date et end_date pour les missions avec périodes
+      const startDate = new Date(mission.start_date || mission.date);
+      startDate.setHours(0, 0, 0, 0);
+      const endDate = new Date(mission.end_date || mission.date || mission.start_date);
+      endDate.setHours(0, 0, 0, 0);
+
+      // Vérifier si la mission chevauche la semaine affichée
+      if (endDate < weekStart || startDate > weekEnd) {
+        return;
+      }
+
+      // Ajuster les dates pour qu'elles restent dans la semaine visible
+      const displayStart = startDate < weekStart ? weekStart : startDate;
+      const displayEnd = endDate > weekEnd ? weekEnd : endDate;
+
+      // Calculer la position dans la grille (1-7)
+      const daysDiff = Math.round((displayStart.getTime() - weekStart.getTime()) / (1000 * 60 * 60 * 24));
+      const columnStart = daysDiff + 1;
+
+      // Calculer le nombre de jours à afficher (inclusif)
+      const daysSpan = Math.round((displayEnd.getTime() - displayStart.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+
+      grouped.push({
+        ...mission,
+        isMultiDay: daysSpan > 1,
+        dayCount: daysSpan,
+        columnStart: Math.max(1, Math.min(columnStart, 7)),
+        columnSpan: Math.max(1, Math.min(daysSpan, 8 - columnStart)),
+        startDate: mission.start_date || mission.date,
+        endDate: mission.end_date || mission.date || mission.start_date
+      });
+    });
+
+    return grouped;
+  };
+
+  const fetchQuoteForMission = async (mission) => {
+    setLoadingQuote(true);
+    setSelectedMission(mission);
+    setQuoteData(null);
+    setSearchData(null);
+    
+    try {
+      const token = localStorage.getItem('token');
+      const worksiteId = mission.worksite_id || mission.worksites?.id;
+      
+      console.log('🔍 Récupération des données pour worksite:', worksiteId);
+      
+      // Récupérer le chantier pour avoir le quote_id et project_id
+      const worksiteRes = await axios.get(`${API}/worksites/${worksiteId}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      
+      console.log('📋 Données du chantier:', worksiteRes.data);
+      
+      const quoteId = worksiteRes.data.quote_id;
+      const projectId = worksiteRes.data.project_id;
+      const clientId = worksiteRes.data.client_id;
+      const address = worksiteRes.data.address;
+      
+      console.log('🎯 Quote ID:', quoteId, '| Project ID:', projectId);
+      
+      // Récupérer le devis si disponible
+      if (quoteId) {
+        try {
+          const quoteRes = await axios.get(`${API}/quotes/${quoteId}`, {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+          console.log('📄 Devis chargé:', quoteRes.data);
+          setQuoteData(quoteRes.data);
+        } catch (err) {
+          console.error('❌ Erreur chargement devis:', err);
+        }
+      }
+      
+      // Récupérer la recherche d'infiltration via le projet
+      if (projectId) {
+        try {
+          console.log('🔎 Récupération du projet:', projectId);
+          const projectRes = await axios.get(`${API}/projects/${projectId}`, {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+          
+          console.log('📦 Données du projet:', projectRes.data);
+          
+          const searchId = projectRes.data.search_id;
+          console.log('🔍 Search ID trouvé:', searchId);
+          
+          if (searchId) {
+            const searchRes = await axios.get(`${API}/searches/${searchId}`, {
+              headers: { Authorization: `Bearer ${token}` }
+            });
+            console.log('✅ Recherche chargée via projet:', searchRes.data);
+            setSearchData(searchRes.data);
+          } else {
+            console.log('⚠️ Aucun search_id dans le projet');
+          }
+        } catch (err) {
+          console.error('❌ Erreur chargement recherche via projet:', err);
+        }
+      } else {
+        console.log('⚠️ Aucun project_id dans le chantier');
+        
+        // Si pas de project_id, chercher la recherche via le client et l'adresse
+        if (clientId || address || worksiteRes.data.client_name) {
+          try {
+            console.log('🔎 Recherche d\'infiltration via client/adresse/nom...');
+            console.log('🎯 Client ID du chantier:', clientId);
+            console.log('📍 Adresse du chantier:', address);
+            console.log('👤 Nom client du chantier:', worksiteRes.data.client_name);
+            
+            const searchesRes = await axios.get(`${API}/searches`, {
+              headers: { Authorization: `Bearer ${token}` }
+            });
+            
+            console.log('📊 Toutes les recherches:', searchesRes.data);
+            
+            // L'API retourne {data: [...], count: ...}
+            const searchesList = searchesRes.data.data || searchesRes.data;
+            console.log('📋 Liste des recherches:', searchesList);
+            
+            const clientName = worksiteRes.data.client_name?.toLowerCase() || '';
+            
+            // Chercher une recherche qui correspond
+            const matchingSearch = searchesList.find(search => {
+              console.log(`🔍 Analyse recherche ${search.id}:`, {
+                client_id: search.client_id,
+                address: search.address || search.location,
+                prenom: search.prenom,
+                nom: search.nom
+              });
+              
+              // Match par client_id
+              const clientMatch = clientId && search.client_id === clientId;
+              
+              // Match par adresse
+              const searchAddress = search.address || search.location || '';
+              const addressMatch = address && searchAddress && 
+                                   (searchAddress.toLowerCase().includes(address.toLowerCase().substring(0, 20)) ||
+                                    address.toLowerCase().includes(searchAddress.toLowerCase().substring(0, 20)));
+              
+              // Match par nom (prenom + nom de la recherche contient le nom du client)
+              const searchFullName = `${search.prenom || ''} ${search.nom || ''}`.toLowerCase().trim();
+              const nameMatch = clientName && searchFullName && 
+                               (searchFullName.includes(clientName) || 
+                                clientName.includes(search.nom?.toLowerCase() || '') ||
+                                clientName.includes(search.prenom?.toLowerCase() || ''));
+              
+              console.log(`   → clientMatch=${clientMatch}, addressMatch=${addressMatch}, nameMatch=${nameMatch}`);
+              return clientMatch || addressMatch || nameMatch;
+            });
+            
+            if (matchingSearch) {
+              console.log('✅ Recherche trouvée par correspondance:', matchingSearch);
+              setSearchData(matchingSearch);
+            } else {
+              console.log('⚠️ Aucune recherche correspondante trouvée');
+            }
+          } catch (err) {
+            console.error('❌ Erreur recherche d\'infiltration:', err);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('❌ Erreur chargement données mission:', error);
+      alert('Erreur lors du chargement des informations');
+      setSelectedMission(null);
+    } finally {
+      setLoadingQuote(false);
+    }
   };
 
   if (loading) {
@@ -3012,128 +4055,1177 @@ const TechnicianPlanning = () => {
     );
   }
 
+  const weekDays = getWeekDays();
+  const weekDayNames = ['LUN.', 'MAR.', 'MER.', 'JEU.', 'VEN.', 'SAM.', 'DIM.'];
+  const monthNames = ['janv.', 'févr.', 'mars', 'avr.', 'mai', 'juin', 'juil.', 'août', 'sept.', 'oct.', 'nov.', 'déc.'];
+
+  // Statistiques de la semaine - utiliser les missions groupées pour compter correctement
+  const weekMissionsGrouped = getWeekMissionsGrouped();
+
   return (
     <div className="space-y-6">
-      {/* Header with filters */}
-      <div className="bg-white/80 backdrop-blur-xl rounded-3xl border-0 shadow-2xl p-8">
-        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center space-y-4 lg:space-y-0 mb-6">
+      {/* Header avec navigation */}
+      <div className="bg-gradient-to-br from-blue-600 to-indigo-700 rounded-3xl shadow-2xl p-8 text-white">
+        <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center space-y-4 lg:space-y-0">
           <div>
-            <h2 className="text-2xl font-semibold text-gray-900">Mes Missions Planifiées</h2>
-            <p className="text-gray-600 mt-1">Consultez toutes les missions où vous avez été assigné</p>
+            <h2 className="text-3xl font-bold flex items-center gap-3">
+              <Calendar className="w-8 h-8" />
+              Mes Missions Planifiées
+            </h2>
+            <p className="text-blue-100 mt-2">Semaine du {weekDays[0].getDate()} au {weekDays[6].getDate()} {monthNames[weekDays[0].getMonth()]} {weekDays[0].getFullYear()}</p>
           </div>
-          <div className="flex space-x-4">
-            <Input
-              type="date"
-              value={filterDate}
-              onChange={(e) => setFilterDate(e.target.value)}
-              className="rounded-xl border-gray-200"
-              placeholder="Filtrer par date"
-            />
-            <select
-              value={filterStatus}
-              onChange={(e) => setFilterStatus(e.target.value)}
-              className="px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-gray-500 focus:border-gray-500"
+          
+          {/* Navigation semaine */}
+          <div className="flex items-center gap-3">
+            <button
+              onClick={goToPreviousWeek}
+              className="p-3 bg-white/20 hover:bg-white/30 rounded-xl transition-all backdrop-blur-sm"
             >
-              <option value="all">Tous les statuts</option>
-              <option value="PLANIFIE">Planifié</option>
-              <option value="EN_COURS">En cours</option>
-              <option value="TERMINE">Terminé</option>
-              <option value="ANNULE">Annulé</option>
-            </select>
+              <ChevronLeft className="w-5 h-5" />
+            </button>
+            <button
+              onClick={goToToday}
+              className="px-4 py-2 bg-white/20 hover:bg-white/30 rounded-xl transition-all backdrop-blur-sm font-medium text-sm"
+            >
+              Aujourd'hui
+            </button>
+            <button
+              onClick={goToNextWeek}
+              className="p-3 bg-white/20 hover:bg-white/30 rounded-xl transition-all backdrop-blur-sm"
+            >
+              <ChevronRight className="w-5 h-5" />
+            </button>
           </div>
         </div>
 
-        {/* Statistics Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-8">
-          <div className="bg-white rounded-xl p-4 shadow-sm">
-            <h3 className="text-sm font-medium text-gray-500">Total Missions</h3>
-            <p className="text-2xl font-bold text-gray-900">{missions.length}</p>
+        {/* Stats rapides de la semaine */}
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mt-6">
+          <div className="bg-white/10 backdrop-blur-sm rounded-xl p-4">
+            <p className="text-blue-100 text-sm">Total Semaine</p>
+            <p className="text-3xl font-bold">{weekMissionsGrouped.length}</p>
           </div>
-          <div className="bg-blue-50 rounded-xl p-4 shadow-sm">
-            <h3 className="text-sm font-medium text-blue-600">Planifiées</h3>
-            <p className="text-2xl font-bold text-blue-900">
-              {missions.filter(m => m.status === 'PLANIFIE').length}
-            </p>
+          <div className="bg-white/10 backdrop-blur-sm rounded-xl p-4">
+            <p className="text-blue-100 text-sm">Planifiées</p>
+            <p className="text-3xl font-bold">{weekMissionsGrouped.filter(m => m.status === 'scheduled').length}</p>
           </div>
-          <div className="bg-orange-50 rounded-xl p-4 shadow-sm">
-            <h3 className="text-sm font-medium text-orange-600">En Cours</h3>
-            <p className="text-2xl font-bold text-orange-900">
-              {missions.filter(m => m.status === 'EN_COURS').length}
-            </p>
+          <div className="bg-white/10 backdrop-blur-sm rounded-xl p-4">
+            <p className="text-blue-100 text-sm">En cours</p>
+            <p className="text-3xl font-bold">{weekMissionsGrouped.filter(m => m.status === 'in_progress').length}</p>
           </div>
-          <div className="bg-green-50 rounded-xl p-4 shadow-sm">
-            <h3 className="text-sm font-medium text-green-600">Terminées</h3>
-            <p className="text-2xl font-bold text-green-900">
-              {missions.filter(m => m.status === 'TERMINE').length}
-            </p>
+          <div className="bg-white/10 backdrop-blur-sm rounded-xl p-4">
+            <p className="text-blue-100 text-sm">Terminées</p>
+            <p className="text-3xl font-bold">{weekMissionsGrouped.filter(m => m.status === 'completed').length}</p>
           </div>
         </div>
       </div>
 
-      {/* Missions List */}
-      <div className="space-y-4">
-        {missions.length === 0 ? (
-          <Card className="bg-white/80 backdrop-blur-xl rounded-3xl border-0 shadow-xl">
-            <CardContent className="p-12 text-center">
-              <Calendar className="h-16 w-16 text-gray-400 mx-auto mb-4" />
-              <h3 className="text-xl font-semibold text-gray-700 mb-2">Aucune mission planifiée</h3>
-              <p className="text-gray-500">Vous n'avez pas encore été assigné à des missions.</p>
-            </CardContent>
-          </Card>
-        ) : (
-          missions
-            .filter(mission => {
-              const matchesDate = !filterDate || mission.date === filterDate;
-              const matchesStatus = filterStatus === 'all' || mission.status === filterStatus;
-              return matchesDate && matchesStatus;
-            })
-            .map((mission, index) => (
-              <Card key={index} className="bg-white/80 backdrop-blur-xl rounded-3xl border-0 shadow-xl hover:shadow-2xl transition-all duration-300">
-                <CardContent className="p-6">
-                  <div className="flex flex-col lg:flex-row justify-between items-start lg:items-center space-y-4 lg:space-y-0">
-                    <div className="flex-1">
-                      <div className="flex items-center space-x-3 mb-2">
-                        <h3 className="text-lg font-semibold text-gray-900">
-                          {mission.worksite_name || `Mission ${mission.id}`}
-                        </h3>
-                        <span className={`px-3 py-1 rounded-full text-xs font-medium border ${getStatusColor(mission.status || 'PLANIFIE')}`}>
-                          {mission.status || 'PLANIFIÉ'}
+      {/* Vue Calendrier Hebdomadaire */}
+      <div className="bg-white rounded-3xl shadow-xl border border-gray-100 overflow-visible">
+        {/* En-têtes des jours */}
+        <div className="grid grid-cols-7 gap-px bg-gray-200">
+          {weekDays.map((day, index) => {
+            const isToday = day.toDateString() === new Date().toDateString();
+            return (
+              <div 
+                key={`header-${index}`}
+                className={`bg-white p-4 text-center border-b-2 ${isToday ? 'border-blue-500 bg-blue-100' : 'border-gray-200'}`}
+              >
+                <div className={`text-xs font-bold uppercase tracking-wide ${isToday ? 'text-blue-700' : 'text-gray-500'}`}>
+                  {weekDayNames[index]}
+                </div>
+                <div className={`text-2xl font-bold mt-1 ${isToday ? 'text-blue-700' : 'text-gray-900'}`}>
+                  {day.getDate()}
+                </div>
+                <div className={`text-xs ${isToday ? 'text-blue-600' : 'text-gray-500'}`}>
+                  {monthNames[day.getMonth()]}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Zone de contenu avec grille pour les missions */}
+        <div className="relative" style={{ minHeight: '400px' }}>
+          {/* Grille de fond pour chaque jour */}
+          <div className="grid grid-cols-7 gap-px bg-gray-200 absolute inset-0">
+            {weekDays.map((day, index) => {
+              const isToday = day.toDateString() === new Date().toDateString();
+              return (
+                <div 
+                  key={`bg-${index}`}
+                  className={`bg-white ${isToday ? 'bg-blue-50/30' : ''}`}
+                />
+              );
+            })}
+          </div>
+
+          {/* Container pour les missions avec grid overlay */}
+          <div className="relative grid grid-cols-7 gap-px" style={{ minHeight: '400px' }}>
+            {getWeekMissionsGrouped().map((mission, idx) => {
+              const hours = parseInt(mission.hours) || 8;
+              const startTime = mission.time || '08:00';
+              const [startHour, startMin] = startTime.split(':').map(Number);
+              const endHour = startHour + hours;
+              const endTime = `${endHour.toString().padStart(2, '0')}:${startMin.toString().padStart(2, '0')}`;
+              const totalHours = mission.dayCount * hours;
+
+              return (
+                <div
+                  key={`mission-${idx}`}
+                  onClick={() => fetchQuoteForMission(mission)}
+                  className={`absolute rounded-xl cursor-pointer hover:shadow-xl transition-all group overflow-hidden ${
+                    mission.isMultiDay 
+                      ? 'bg-white border-2 border-blue-300' 
+                      : 'bg-gradient-to-br from-blue-500 to-indigo-600 shadow-lg border border-blue-400'
+                  }`}
+                  style={{
+                    left: `calc(${(mission.columnStart - 1) * (100 / 7)}% + 8px)`,
+                    right: `calc(${(7 - mission.columnStart - mission.columnSpan + 1) * (100 / 7)}% + 8px)`,
+                    top: `${20 + idx * 10}px`,
+                    zIndex: 10 + idx
+                  }}
+                >
+                  {/* Badge statut */}
+                  {mission.status !== 'scheduled' && (
+                    <div className="absolute top-2 right-2 w-5 h-5 rounded-full bg-orange-500 border-2 border-white shadow-md z-20 flex items-center justify-center">
+                      <span className="text-white text-xs font-bold">!</span>
+                    </div>
+                  )}
+                  
+                  {/* En-tête avec icône et horaire */}
+                  <div className={`px-3 py-2 border-b ${
+                    mission.isMultiDay ? 'bg-blue-50 border-blue-200' : 'bg-white/10 border-white/20'
+                  }`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <div className={`w-6 h-6 rounded-full flex items-center justify-center font-bold text-xs flex-shrink-0 ${
+                          mission.isMultiDay 
+                            ? 'bg-blue-200 text-blue-700'
+                            : 'bg-white/20 text-white'
+                        }`}>
+                          {mission.worksites?.clients?.name 
+                            ? mission.worksites.clients.name.split(' ').map(n => n[0]).join('').substring(0, 2).toUpperCase()
+                            : '?'}
+                        </div>
+                        <span className={`font-semibold text-xs ${
+                          mission.isMultiDay ? 'text-blue-900' : 'text-white'
+                        }`}>
+                          {startTime} - {endTime}
                         </span>
                       </div>
-                      <div className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm text-gray-600">
-                        <div className="flex items-center space-x-2">
-                          <Calendar className="h-4 w-4 text-gray-400" />
-                          <span>{formatDate(mission.date)}</span>
-                        </div>
-                        <div className="flex items-center space-x-2">
-                          <Clock className="h-4 w-4 text-gray-400" />
-                          <span>{formatTime(mission.time)} - {mission.shift}</span>
-                        </div>
-                        <div className="flex items-center space-x-2">
-                          <Users className="h-4 w-4 text-gray-400" />
-                          <span>{mission.team_leader_name || 'Chef d\'équipe non défini'}</span>
-                        </div>
-                      </div>
-                      {mission.description && (
-                        <p className="text-gray-600 mt-2">{mission.description}</p>
+                      {(mission.client_name || mission.worksites?.clients?.name || mission.worksites?.clients?.prenom) && (
+                        <span className={`px-2 py-0.5 rounded-full text-xs font-bold truncate max-w-[120px] ${
+                          mission.isMultiDay 
+                            ? 'bg-blue-200 text-blue-700'
+                            : 'bg-white/20 text-white'
+                        }`} title={mission.client_name || mission.worksites?.clients?.name || ''}>
+                          {mission.client_name || mission.worksites?.clients?.name || mission.worksites?.clients?.prenom}
+                        </span>
                       )}
                     </div>
-                    <div className="flex space-x-2">
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="rounded-xl border-gray-200 hover:bg-gray-50"
-                      >
-                        <Eye className="h-4 w-4 mr-2" />
-                        Détails
-                      </Button>
+                  </div>
+
+                  {/* Contenu principal */}
+                  <div className="p-3">
+                    {/* Nom du client */}
+                    {mission.worksites?.clients?.name && (
+                      <p className={`text-xs font-semibold mb-1 uppercase tracking-wide ${
+                        mission.isMultiDay 
+                          ? 'text-blue-600'
+                          : 'text-white/90'
+                      }`}>
+                        {mission.worksites.clients.name}
+                      </p>
+                    )}
+                    
+                    {/* Titre mission */}
+                    <p className={`font-bold text-sm mb-2 leading-tight line-clamp-2 ${
+                      mission.isMultiDay 
+                        ? 'text-gray-900'
+                        : 'text-white'
+                    }`}>
+                      {mission.worksites?.title || mission.worksite_name || 'Chantier'}
+                    </p>
+
+                    {/* Adresse du chantier au lieu des dates */}
+                    {(mission.worksites?.address || mission.worksites?.clients?.address) && (
+                      <div className="mb-2">
+                        <div className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-xs font-medium ${
+                          mission.isMultiDay 
+                            ? 'text-blue-700 bg-blue-100'
+                            : 'text-white bg-white/20'
+                        }`}>
+                          <MapPin className="w-3 h-3 flex-shrink-0" />
+                          <span className="truncate">
+                            {mission.worksites?.address || mission.worksites?.clients?.address}
+                          </span>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Informations complémentaires */}
+                    <div className={`flex flex-col gap-1 text-xs ${
+                      mission.isMultiDay ? 'text-gray-600' : 'text-white/80'
+                    }`}>
+                      {mission.worksites?.clients?.name && (
+                        <div className="flex items-center gap-1">
+                          <Building className="w-3 h-3 flex-shrink-0" />
+                          <span className="truncate font-medium">{mission.worksites.clients.name}</span>
+                        </div>
+                      )}
+                      {mission.team_leader_name && (
+                        <div className="flex items-center gap-1">
+                          <User className="w-3 h-3 flex-shrink-0" />
+                          <span className="truncate">{mission.team_leader_name}</span>
+                        </div>
+                      )}
                     </div>
                   </div>
-                </CardContent>
-              </Card>
-            ))
-        )}
+
+                  {/* Hover effect */}
+                  <div className={`absolute inset-0 rounded-xl transition-opacity pointer-events-none ${
+                    mission.isMultiDay 
+                      ? 'bg-blue-500 opacity-0 group-hover:opacity-5'
+                      : 'bg-white opacity-0 group-hover:opacity-10'
+                  }`}></div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
       </div>
+
+      {/* Modale de devis sans prix */}
+      {selectedMission && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto shadow-2xl">
+            <div className="sticky top-0 bg-white border-b border-gray-200 p-6 flex justify-between items-center z-10">
+              <div>
+                <h2 className="text-2xl font-bold text-gray-900">Détail de la Mission</h2>
+                <p className="text-sm text-gray-600 mt-1">
+                  {selectedMission.worksites?.title || selectedMission.worksite_name || 'Chantier'}
+                </p>
+              </div>
+              <button
+                onClick={() => {
+                  setSelectedMission(null);
+                  setQuoteData(null);
+                }}
+                className="p-2 hover:bg-gray-100 rounded-xl transition-colors"
+              >
+                <X className="w-6 h-6 text-gray-500" />
+              </button>
+            </div>
+
+            <div className="p-6">
+              {loadingQuote ? (
+                <div className="text-center py-12">
+                  <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
+                  <p className="mt-4 text-gray-600">Chargement des détails...</p>
+                </div>
+              ) : (
+                <div className="space-y-6">
+                  {/* Informations mission */}
+                  <div className="bg-gradient-to-br from-blue-50 to-indigo-50 rounded-xl p-5 border border-blue-200">
+                    <h3 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
+                      <Calendar className="w-5 h-5 text-blue-600" />
+                      Informations Mission
+                    </h3>
+                    <div className="grid grid-cols-2 gap-4 text-sm">
+                      <div className="flex items-center gap-2">
+                        <Clock className="w-4 h-4 text-gray-500" />
+                        <div>
+                          <span className="text-gray-600">Date:</span>
+                          <span className="ml-2 font-semibold text-gray-900">
+                            {new Date(selectedMission.date).toLocaleDateString('fr-FR', { 
+                              weekday: 'long', 
+                              day: 'numeric', 
+                              month: 'long', 
+                              year: 'numeric' 
+                            })}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Clock className="w-4 h-4 text-gray-500" />
+                        <div>
+                          <span className="text-gray-600">Horaire:</span>
+                          <span className="ml-2 font-semibold text-gray-900">{selectedMission.time}</span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <User className="w-4 h-4 text-gray-500" />
+                        <div>
+                          <span className="text-gray-600">Chef d'équipe:</span>
+                          <span className="ml-2 font-semibold text-gray-900">{selectedMission.team_leader_name || 'Non défini'}</span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <Timer className="w-4 h-4 text-gray-500" />
+                        <div>
+                          <span className="text-gray-600">Durée:</span>
+                          <span className="ml-2 font-semibold text-gray-900">{selectedMission.hours || 8}h</span>
+                        </div>
+                      </div>
+                    </div>
+                    {selectedMission.description && (
+                      <div className="mt-4 pt-4 border-t border-blue-200">
+                        <span className="text-gray-600 text-sm font-medium flex items-center gap-2">
+                          <Info className="w-4 h-4" />
+                          Description:
+                        </span>
+                        <p className="mt-2 text-gray-900">{selectedMission.description}</p>
+                      </div>
+                    )}
+                    
+                    {/* Si mission multi-jours */}
+                    {selectedMission.isMultiDay && selectedMission.groupedMissions && (
+                      <div className="mt-4 pt-4 border-t border-blue-200">
+                        <p className="text-sm font-medium text-blue-700 mb-2">Mission sur plusieurs jours:</p>
+                        <div className="space-y-1">
+                          {selectedMission.groupedMissions.map((m, idx) => (
+                            <div key={idx} className="text-sm text-gray-700 flex items-center gap-2">
+                              <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
+                              {new Date(m.date).toLocaleDateString('fr-FR')} - {m.time} ({m.hours || 8}h)
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Devis associé */}
+                  {quoteData && (
+                    <div>
+                      <h3 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
+                        <FileText className="w-5 h-5 text-gray-600" />
+                        Devis associé
+                      </h3>
+                      
+                      {/* Info devis */}
+                      <div className="bg-gray-50 rounded-xl p-4 mb-4">
+                        <div className="grid grid-cols-2 gap-4 text-sm">
+                          <div>
+                            <span className="text-gray-600">Numéro:</span>
+                            <span className="ml-2 font-semibold text-gray-900">{quoteData.quote_number || 'N/A'}</span>
+                          </div>
+                          <div>
+                            <span className="text-gray-600">Date:</span>
+                            <span className="ml-2 font-semibold text-gray-900">
+                              {quoteData.created_at ? new Date(quoteData.created_at).toLocaleDateString('fr-FR') : 'N/A'}
+                            </span>
+                          </div>
+                          {quoteData.client_name && (
+                            <div>
+                              <span className="text-gray-600">Client:</span>
+                              <span className="ml-2 font-semibold text-gray-900">{quoteData.client_name}</span>
+                            </div>
+                          )}
+                          {quoteData.status && (
+                            <div>
+                              <span className="text-gray-600">Statut:</span>
+                              <span className="ml-2 font-semibold text-gray-900">{quoteData.status}</span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Articles du devis (sans prix) */}
+                      <div className="space-y-3">
+                        <h4 className="font-semibold text-gray-700">Articles à réaliser:</h4>
+                        {(quoteData.items || []).map((item, index) => (
+                          <div key={index} className="bg-white border-2 border-gray-200 rounded-xl p-4 hover:border-blue-300 transition-all">
+                            <div className="flex items-start gap-3">
+                              <div className="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center flex-shrink-0">
+                                <span className="text-blue-700 font-bold text-sm">{index + 1}</span>
+                              </div>
+                              <div className="flex-1">
+                                <h5 className="font-semibold text-gray-900 mb-2">{item.description}</h5>
+                                <div className="grid grid-cols-2 gap-3 text-sm text-gray-600">
+                                  <div className="flex items-center gap-2">
+                                    <div className="w-1.5 h-1.5 bg-gray-400 rounded-full"></div>
+                                    <span><span className="font-medium">Quantité:</span> {item.quantity} {item.unit || 'u'}</span>
+                                  </div>
+                                  {item.reference && (
+                                    <div className="flex items-center gap-2">
+                                      <div className="w-1.5 h-1.5 bg-gray-400 rounded-full"></div>
+                                      <span><span className="font-medium">Réf:</span> {item.reference}</span>
+                                    </div>
+                                  )}
+                                </div>
+                                {item.notes && (
+                                  <div className="mt-3 pt-3 border-t border-gray-100">
+                                    <p className="text-sm text-gray-600">
+                                      <span className="font-medium text-gray-700">Notes:</span> {item.notes}
+                                    </p>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      {/* Total articles */}
+                      <div className="mt-4 bg-blue-50 rounded-xl p-4 border border-blue-200">
+                        <p className="text-sm font-semibold text-blue-900">
+                          Total: {(quoteData.items || []).length} article(s) à réaliser
+                        </p>
+                      </div>
+                    </div>
+                  )}
+
+                  {!quoteData && !loadingQuote && (
+                    <div className="text-center py-8 bg-gray-50 rounded-xl">
+                      <FileText className="w-12 h-12 text-gray-400 mx-auto mb-3" />
+                      <p className="text-gray-600">Aucun devis associé à cette mission</p>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Actions */}
+            <div className="sticky bottom-0 bg-white border-t border-gray-200 p-6">
+              {/* Debug Info */}
+              {console.log('🎨 Rendu des boutons - quoteData:', !!quoteData, '| searchData:', !!searchData)}
+              
+              <div className="flex justify-between items-center gap-3">
+                {/* Boutons d'accès aux documents */}
+                <div className="flex gap-3">
+                  {quoteData && (
+                    <button
+                      onClick={() => setShowQuoteModal(true)}
+                      className="px-6 py-2.5 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-all font-medium flex items-center gap-2"
+                    >
+                      <FileText className="w-4 h-4" />
+                      Voir le Devis
+                    </button>
+                  )}
+                  {searchData && (
+                    <button
+                      onClick={() => {
+                        console.log('📊 Ouverture modale recherche avec data:', searchData);
+                        setShowSearchModal(true);
+                      }}
+                      className="px-6 py-2.5 bg-purple-600 text-white rounded-xl hover:bg-purple-700 transition-all font-medium flex items-center gap-2"
+                    >
+                      <Search className="w-4 h-4" />
+                      Voir la Recherche
+                    </button>
+                  )}
+                </div>
+                
+                {/* Boutons de contrôle */}
+                <div className="flex gap-3">
+                  <button
+                    onClick={() => {
+                      setSelectedMission(null);
+                      setQuoteData(null);
+                      setSearchData(null);
+                    }}
+                    className="px-6 py-2.5 bg-gray-100 text-gray-700 rounded-xl hover:bg-gray-200 transition-all font-medium"
+                  >
+                    Fermer
+                  </button>
+                  {selectedMission.status === 'scheduled' && (
+                    <button className="px-6 py-2.5 bg-green-600 text-white rounded-xl hover:bg-green-700 transition-all font-medium flex items-center gap-2">
+                      <Play className="w-4 h-4" />
+                      Démarrer la mission
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modale Devis complet (sans prix) */}
+      {showQuoteModal && quoteData && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-[60]">
+          <div className="bg-white rounded-2xl max-w-5xl w-full max-h-[90vh] overflow-y-auto shadow-2xl">
+            <div className="sticky top-0 bg-gradient-to-r from-blue-600 to-indigo-600 text-white p-6 flex justify-between items-center z-10">
+              <div>
+                <h2 className="text-2xl font-bold">Devis #{quoteData.quote_number}</h2>
+                <p className="text-blue-100 text-sm mt-1">Informations techniques (sans prix)</p>
+              </div>
+              <button
+                onClick={() => setShowQuoteModal(false)}
+                className="p-2 hover:bg-white/20 rounded-xl transition-colors"
+              >
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-6">
+              {/* Informations générales */}
+              <div className="bg-gray-50 rounded-xl p-5">
+                <h3 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
+                  <FileText className="w-5 h-5 text-blue-600" />
+                  Informations Générales
+                </h3>
+                <div className="grid grid-cols-2 gap-4 text-sm">
+                  <div>
+                    <span className="text-gray-600">Date création:</span>
+                    <span className="ml-2 font-semibold text-gray-900">
+                      {quoteData.created_at ? new Date(quoteData.created_at).toLocaleDateString('fr-FR') : 'N/A'}
+                    </span>
+                  </div>
+                  {quoteData.client_name && (
+                    <div>
+                      <span className="text-gray-600">Client:</span>
+                      <span className="ml-2 font-semibold text-gray-900">{quoteData.client_name}</span>
+                    </div>
+                  )}
+                  {quoteData.client_email && (
+                    <div>
+                      <span className="text-gray-600">Email:</span>
+                      <span className="ml-2 font-semibold text-gray-900">{quoteData.client_email}</span>
+                    </div>
+                  )}
+                  {quoteData.client_phone && (
+                    <div>
+                      <span className="text-gray-600">Téléphone:</span>
+                      <span className="ml-2 font-semibold text-gray-900">{quoteData.client_phone}</span>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Adresse */}
+              {quoteData.address && (
+                <div className="bg-blue-50 rounded-xl p-5 border border-blue-200">
+                  <h3 className="font-bold text-gray-900 mb-2 flex items-center gap-2">
+                    <MapPin className="w-5 h-5 text-blue-600" />
+                    Adresse du chantier
+                  </h3>
+                  <p className="text-gray-900">{quoteData.address}</p>
+                </div>
+              )}
+
+              {/* Articles détaillés */}
+              <div>
+                <h3 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
+                  <Package className="w-5 h-5 text-gray-600" />
+                  Articles à réaliser ({(quoteData.items || []).length})
+                </h3>
+                <div className="space-y-3">
+                  {(quoteData.items || []).map((item, index) => (
+                    <div key={index} className="bg-white border-2 border-gray-200 rounded-xl p-5 hover:border-blue-300 transition-all">
+                      <div className="flex items-start gap-4">
+                        <div className="w-10 h-10 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-xl flex items-center justify-center flex-shrink-0 shadow-lg">
+                          <span className="text-white font-bold">{index + 1}</span>
+                        </div>
+                        <div className="flex-1">
+                          <h5 className="font-bold text-gray-900 mb-3 text-lg">{item.description}</h5>
+                          <div className="grid grid-cols-2 gap-4 text-sm">
+                            <div className="bg-gray-50 rounded-lg p-3">
+                              <span className="text-gray-600 block mb-1">Quantité</span>
+                              <span className="font-bold text-gray-900 text-lg">{item.quantity} {item.unit || 'u'}</span>
+                            </div>
+                            {item.reference && (
+                              <div className="bg-gray-50 rounded-lg p-3">
+                                <span className="text-gray-600 block mb-1">Référence</span>
+                                <span className="font-bold text-gray-900">{item.reference}</span>
+                              </div>
+                            )}
+                          </div>
+                          {item.notes && (
+                            <div className="mt-4 pt-4 border-t border-gray-200">
+                              <p className="text-sm text-gray-700 bg-yellow-50 p-3 rounded-lg border border-yellow-200">
+                                <span className="font-bold text-yellow-800">📝 Notes:</span> {item.notes}
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Résumé */}
+              <div className="bg-gradient-to-br from-blue-600 to-indigo-600 text-white rounded-xl p-5">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="text-blue-100 text-sm">Total articles</p>
+                    <p className="text-3xl font-bold">{(quoteData.items || []).length}</p>
+                  </div>
+                  <CheckCircle className="w-12 h-12 text-blue-200" />
+                </div>
+              </div>
+            </div>
+
+            <div className="sticky bottom-0 bg-white border-t border-gray-200 p-6">
+              <button
+                onClick={() => setShowQuoteModal(false)}
+                className="w-full px-6 py-3 bg-blue-600 text-white rounded-xl hover:bg-blue-700 transition-all font-medium"
+              >
+                Fermer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modale Recherche d'infiltration */}
+      {showSearchModal && searchData && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-[60]">
+          <div className="bg-white rounded-2xl max-w-6xl w-full max-h-[90vh] overflow-y-auto shadow-2xl">
+            <div className="sticky top-0 bg-gradient-to-r from-purple-600 to-indigo-600 text-white p-6 flex justify-between items-center z-10">
+              <div>
+                <h2 className="text-2xl font-bold">Recherche d'Infiltration</h2>
+                <p className="text-purple-100 text-sm mt-1">
+                  {searchData.search_type === 'terrain' ? 'Recherche Terrain' : 
+                   searchData.search_type === 'pre_search' ? 'Pré-recherche' : 'Recherche'}
+                </p>
+              </div>
+              <button
+                onClick={() => setShowSearchModal(false)}
+                className="p-2 hover:bg-white/20 rounded-xl transition-colors"
+              >
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-6">
+              {/* Informations générales */}
+              <div className="bg-gray-50 rounded-xl p-5">
+                <h3 className="font-bold text-gray-900 mb-4 flex items-center gap-2">
+                  <Info className="w-5 h-5 text-purple-600" />
+                  Informations Recherche
+                </h3>
+                <div className="grid grid-cols-2 gap-4 text-sm">
+                  <div>
+                    <span className="text-gray-600">Date:</span>
+                    <span className="ml-2 font-semibold text-gray-900">
+                      {searchData.created_at ? new Date(searchData.created_at).toLocaleDateString('fr-FR') : 'N/A'}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-gray-600">Type:</span>
+                    <span className="ml-2 font-semibold text-gray-900">
+                      {searchData.search_type === 'terrain' ? 'Terrain' : 
+                       searchData.search_type === 'pre_search' ? 'Pré-recherche' : 'Standard'}
+                    </span>
+                  </div>
+                  {searchData.client_name && (
+                    <div>
+                      <span className="text-gray-600">Client:</span>
+                      <span className="ml-2 font-semibold text-gray-900">{searchData.client_name}</span>
+                    </div>
+                  )}
+                  <div>
+                    <span className="text-gray-600">Statut:</span>
+                    <span className="ml-2 font-semibold text-gray-900">{searchData.status || 'En cours'}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Adresse */}
+              {searchData.address && (
+                <div className="bg-purple-50 rounded-xl p-5 border border-purple-200">
+                  <h3 className="font-bold text-gray-900 mb-2 flex items-center gap-2">
+                    <MapPin className="w-5 h-5 text-purple-600" />
+                    Adresse
+                  </h3>
+                  <p className="text-gray-900">{searchData.address}</p>
+                </div>
+              )}
+
+              {/* Description de la recherche */}
+              {searchData.description && (
+                <div className="bg-blue-50 rounded-xl p-5 border border-blue-200">
+                  <h3 className="font-bold text-gray-900 mb-3 flex items-center gap-2">
+                    <FileText className="w-5 h-5 text-blue-600" />
+                    Description de la recherche
+                  </h3>
+                  <p className="text-gray-900 leading-relaxed whitespace-pre-wrap">{searchData.description}</p>
+                  
+                  {/* Photo principale si elle existe */}
+                  {searchData.photos && searchData.photos.length > 0 && searchData.photos[0] && (
+                    <div className="mt-4">
+                      <p className="text-xs text-gray-600 mb-2 flex items-center gap-1">
+                        <ImageIcon className="w-3 h-3" />
+                        PHOTOS (1)
+                      </p>
+                      <img
+                        src={searchData.photos[0].url || searchData.photos[0]}
+                        alt="Photo principale"
+                        className="w-48 h-auto rounded-lg border-2 border-gray-200 shadow-sm"
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Observations et sections personnalisées */}
+              {(() => {
+                let observationsData = null;
+                if (searchData.observations) {
+                  try {
+                    // Tenter de parser les observations si c'est du JSON
+                    observationsData = typeof searchData.observations === 'string' 
+                      ? JSON.parse(searchData.observations) 
+                      : searchData.observations;
+                  } catch (e) {
+                    // Si ce n'est pas du JSON, utiliser tel quel
+                    observationsData = { text: searchData.observations };
+                  }
+                }
+
+                if (!observationsData) return null;
+
+                return (
+                  <>
+                    {/* Observations et remarques */}
+                    {observationsData.text && (
+                      <div className="bg-yellow-50 rounded-xl p-5 border border-yellow-200">
+                        <h3 className="font-bold text-gray-900 mb-3 flex items-center gap-2">
+                          <Eye className="w-5 h-5 text-yellow-600" />
+                          Observations et remarques
+                        </h3>
+                        <p className="text-gray-900 leading-relaxed whitespace-pre-wrap mb-4">
+                          {observationsData.text}
+                        </p>
+                        
+                        {/* Photos des observations (indices 1 à 5 par exemple) */}
+                        {searchData.photos && searchData.photos.length > 1 && (
+                          <div>
+                            <p className="text-xs text-gray-600 mb-2 flex items-center gap-1">
+                              <ImageIcon className="w-3 h-3" />
+                              Photos ({Math.min(5, searchData.photos.length - 1)})
+                            </p>
+                            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                              {searchData.photos.slice(1, 6).map((photo, index) => (
+                                <div key={index} className="relative group">
+                                  <img
+                                    src={photo.url || photo}
+                                    alt={`Photo ${index + 1}`}
+                                    className="w-full h-32 object-cover rounded-lg border-2 border-gray-200 hover:border-yellow-400 transition-all shadow-sm"
+                                  />
+                                  <div className="absolute top-1 left-1 bg-black bg-opacity-70 text-white text-xs font-bold px-2 py-1 rounded">
+                                    #{index + 1}
+                                  </div>
+                                  <div className="absolute inset-0 bg-black bg-opacity-0 group-hover:bg-opacity-30 transition-all rounded-lg flex items-center justify-center">
+                                    <Eye className="w-6 h-6 text-white opacity-0 group-hover:opacity-100 transition-opacity" />
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Sections personnalisées (Inspection Extérieure, Conclusion, etc.) */}
+                    {observationsData.customSections && observationsData.customSections.length > 0 && (
+                      <>
+                        {observationsData.customSections.map((section, index) => {
+                          // Déterminer les photos pour cette section (par exemple photos 6 à 13 pour la première section)
+                          const startPhotoIndex = 6 + (index * 8);
+                          const endPhotoIndex = startPhotoIndex + 8;
+                          const sectionPhotos = searchData.photos ? searchData.photos.slice(startPhotoIndex, endPhotoIndex) : [];
+                          
+                          return (
+                            <div key={section.id || index} className="bg-gradient-to-br from-purple-50 to-indigo-50 rounded-xl p-5 border-2 border-purple-200">
+                              <h3 className="font-bold text-gray-900 mb-3 flex items-center gap-2">
+                                <div className="w-8 h-8 bg-gradient-to-br from-purple-500 to-indigo-600 rounded-lg flex items-center justify-center shadow-lg">
+                                  <span className="text-white font-bold text-sm">+</span>
+                                </div>
+                                {section.title || `Section ${index + 1}`}
+                              </h3>
+                              <p className="text-gray-900 leading-relaxed whitespace-pre-wrap mb-4">
+                                {section.value}
+                              </p>
+                              
+                              {/* Photos de la section */}
+                              {sectionPhotos.length > 0 && (
+                                <div>
+                                  <p className="text-xs text-purple-700 mb-2 flex items-center gap-1">
+                                    <ImageIcon className="w-3 h-3" />
+                                    Photos ({sectionPhotos.length})
+                                  </p>
+                                  <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                                    {sectionPhotos.map((photo, photoIndex) => (
+                                      <div key={photoIndex} className="relative group">
+                                        <img
+                                          src={photo.url || photo}
+                                          alt={`${section.title} - Photo ${photoIndex + 1}`}
+                                          className="w-full h-32 object-cover rounded-lg border-2 border-purple-200 hover:border-purple-400 transition-all shadow-sm"
+                                        />
+                                        <div className="absolute top-1 left-1 bg-black bg-opacity-70 text-white text-xs font-bold px-2 py-1 rounded">
+                                          #{photoIndex + 1}
+                                        </div>
+                                        <div className="absolute inset-0 bg-black bg-opacity-0 group-hover:bg-opacity-30 transition-all rounded-lg flex items-center justify-center">
+                                          <Eye className="w-6 h-6 text-white opacity-0 group-hover:opacity-100 transition-opacity" />
+                                        </div>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </>
+                    )}
+                  </>
+                );
+              })()}
+
+              {/* Notes et observations générales */}
+              {searchData.notes && (
+                <div className="bg-orange-50 rounded-xl p-5 border border-orange-200">
+                  <h3 className="font-bold text-gray-900 mb-3 flex items-center gap-2">
+                    <AlertCircle className="w-5 h-5 text-orange-600" />
+                    Notes complémentaires
+                  </h3>
+                  <p className="text-gray-900 leading-relaxed whitespace-pre-wrap">{searchData.notes}</p>
+                </div>
+              )}
+            </div>
+
+            <div className="sticky bottom-0 bg-white border-t border-gray-200 p-6">
+              <button
+                onClick={() => setShowSearchModal(false)}
+                className="w-full px-6 py-3 bg-purple-600 text-white rounded-xl hover:bg-purple-700 transition-all font-medium"
+              >
+                Fermer
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Composant de formulaire de compte-rendu de chantier
+const MissionReportForm = ({ mission, token, onCancel, onComplete }) => {
+  const [loading, setLoading] = useState(false);
+  const [formData, setFormData] = useState({
+    works_performed: '',
+    materials_used: '',
+    duration_hours: '',
+    observations: '',
+    issues_encountered: ''
+  });
+  const [photosBefore, setPhotosBefore] = useState([]);
+  const [photosAfter, setPhotosAfter] = useState([]);
+  const [photosBeforePreview, setPhotosBeforePreview] = useState([]);
+  const [photosAfterPreview, setPhotosAfterPreview] = useState([]);
+
+  const handleInputChange = (field, value) => {
+    setFormData(prev => ({ ...prev, [field]: value }));
+  };
+
+  const handlePhotoUpload = (e, type) => {
+    const files = Array.from(e.target.files);
+    if (type === 'before') {
+      setPhotosBefore(prev => [...prev, ...files]);
+      files.forEach(file => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          setPhotosBeforePreview(prev => [...prev, reader.result]);
+        };
+        reader.readAsDataURL(file);
+      });
+    } else {
+      setPhotosAfter(prev => [...prev, ...files]);
+      files.forEach(file => {
+        const reader = new FileReader();
+        reader.onloadend = () => {
+          setPhotosAfterPreview(prev => [...prev, reader.result]);
+        };
+        reader.readAsDataURL(file);
+      });
+    }
+  };
+
+  const removePhoto = (index, type) => {
+    if (type === 'before') {
+      setPhotosBefore(prev => prev.filter((_, i) => i !== index));
+      setPhotosBeforePreview(prev => prev.filter((_, i) => i !== index));
+    } else {
+      setPhotosAfter(prev => prev.filter((_, i) => i !== index));
+      setPhotosAfterPreview(prev => prev.filter((_, i) => i !== index));
+    }
+  };
+
+  const handleSubmit = async () => {
+    if (!formData.works_performed) {
+      alert('Veuillez renseigner les travaux effectués');
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const formDataToSend = new FormData();
+      formDataToSend.append('mission_id', mission.id);
+      formDataToSend.append('works_performed', formData.works_performed);
+      formDataToSend.append('materials_used', formData.materials_used);
+      formDataToSend.append('duration_hours', formData.duration_hours);
+      formDataToSend.append('observations', formData.observations);
+      formDataToSend.append('issues_encountered', formData.issues_encountered);
+      
+      photosBefore.forEach(photo => {
+        formDataToSend.append('photos_before', photo);
+      });
+      
+      photosAfter.forEach(photo => {
+        formDataToSend.append('photos_after', photo);
+      });
+
+      await axios.post(`${API}/mission-reports`, formDataToSend, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'multipart/form-data'
+        }
+      });
+
+      alert('Compte-rendu enregistré avec succès !');
+      onComplete();
+    } catch (error) {
+      console.error('Erreur lors de l\'enregistrement:', error);
+      alert('Erreur lors de l\'enregistrement du compte-rendu');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="max-w-4xl mx-auto">
+      <Card className="bg-white rounded-2xl border-0 shadow-lg">
+        <CardHeader className="pb-6">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center space-x-4">
+              <div className="w-14 h-14 bg-gradient-to-br from-green-500 to-green-600 rounded-xl flex items-center justify-center">
+                <ClipboardList className="h-7 w-7 text-white" />
+              </div>
+              <div>
+                <CardTitle className="text-2xl font-semibold text-gray-900">
+                  Compte-Rendu de Chantier
+                </CardTitle>
+                <CardDescription className="text-gray-600 mt-1">
+                  {mission.title}
+                </CardDescription>
+              </div>
+            </div>
+            <Button variant="ghost" onClick={onCancel}>
+              <X className="h-5 w-5" />
+            </Button>
+          </div>
+        </CardHeader>
+
+        <CardContent className="space-y-6">
+          {/* Informations du chantier (lecture seule) */}
+          <div className="bg-green-50 border border-green-200 rounded-xl p-4">
+            <h3 className="text-sm font-semibold text-green-900 mb-3 flex items-center">
+              <MapPin className="h-4 w-4 mr-2" />
+              Informations du chantier
+            </h3>
+            <div className="grid grid-cols-2 gap-3 text-sm">
+              <div>
+                <span className="text-gray-600">Localisation:</span>
+                <p className="font-medium text-gray-900">{mission.location}</p>
+              </div>
+              <div>
+                <span className="text-gray-600">Date:</span>
+                <p className="font-medium text-gray-900">
+                  {mission.date ? new Date(mission.date).toLocaleDateString('fr-FR') : 'Non définie'}
+                </p>
+              </div>
+              {mission.client_name && (
+                <div>
+                  <span className="text-gray-600">Client:</span>
+                  <p className="font-medium text-gray-900">{mission.client_name}</p>
+                </div>
+              )}
+              {mission.intervention_category && (
+                <div>
+                  <span className="text-gray-600">Type:</span>
+                  <p className="font-medium text-gray-900 capitalize">{mission.intervention_category}</p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Travaux effectués */}
+          <div>
+            <label className="block text-sm font-semibold text-gray-900 mb-2">
+              Travaux effectués <span className="text-red-500">*</span>
+            </label>
+            <textarea
+              value={formData.works_performed}
+              onChange={(e) => handleInputChange('works_performed', e.target.value)}
+              placeholder="Décrivez en détail les travaux réalisés..."
+              className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-transparent resize-none"
+              rows={4}
+            />
+          </div>
+
+          {/* Matériaux utilisés */}
+          <div>
+            <label className="block text-sm font-semibold text-gray-900 mb-2">
+              Matériaux utilisés
+            </label>
+            <textarea
+              value={formData.materials_used}
+              onChange={(e) => handleInputChange('materials_used', e.target.value)}
+              placeholder="Liste des matériaux et quantités utilisés..."
+              className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-transparent resize-none"
+              rows={3}
+            />
+          </div>
+
+          {/* Durée d'intervention */}
+          <div>
+            <label className="block text-sm font-semibold text-gray-900 mb-2">
+              Durée d'intervention (heures)
+            </label>
+            <Input
+              type="number"
+              step="0.5"
+              value={formData.duration_hours}
+              onChange={(e) => handleInputChange('duration_hours', e.target.value)}
+              placeholder="Ex: 3.5"
+              className="border-gray-300 focus:ring-green-500"
+            />
+          </div>
+
+          {/* Photos avant */}
+          <div>
+            <label className="block text-sm font-semibold text-gray-900 mb-2">
+              Photos avant travaux
+            </label>
+            <div className="space-y-3">
+              <input
+                type="file"
+                accept="image/*"
+                multiple
+                onChange={(e) => handlePhotoUpload(e, 'before')}
+                className="hidden"
+                id="photos-before"
+              />
+              <label
+                htmlFor="photos-before"
+                className="flex items-center justify-center w-full px-4 py-3 border-2 border-dashed border-gray-300 rounded-xl hover:border-green-500 cursor-pointer transition-colors"
+              >
+                <Camera className="h-5 w-5 text-gray-400 mr-2" />
+                <span className="text-gray-600">Ajouter des photos avant</span>
+              </label>
+              {photosBeforePreview.length > 0 && (
+                <div className="grid grid-cols-3 gap-3">
+                  {photosBeforePreview.map((preview, index) => (
+                    <div key={index} className="relative group">
+                      <img src={preview} alt={`Avant ${index + 1}`} className="w-full h-24 object-cover rounded-lg" />
+                      <button
+                        onClick={() => removePhoto(index, 'before')}
+                        className="absolute top-1 right-1 bg-red-500 text-white rounded-full p-1 opacity-0 group-hover:opacity-100 transition-opacity"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Photos après */}
+          <div>
+            <label className="block text-sm font-semibold text-gray-900 mb-2">
+              Photos après travaux
+            </label>
+            <div className="space-y-3">
+              <input
+                type="file"
+                accept="image/*"
+                multiple
+                onChange={(e) => handlePhotoUpload(e, 'after')}
+                className="hidden"
+                id="photos-after"
+              />
+              <label
+                htmlFor="photos-after"
+                className="flex items-center justify-center w-full px-4 py-3 border-2 border-dashed border-gray-300 rounded-xl hover:border-green-500 cursor-pointer transition-colors"
+              >
+                <Camera className="h-5 w-5 text-gray-400 mr-2" />
+                <span className="text-gray-600">Ajouter des photos après</span>
+              </label>
+              {photosAfterPreview.length > 0 && (
+                <div className="grid grid-cols-3 gap-3">
+                  {photosAfterPreview.map((preview, index) => (
+                    <div key={index} className="relative group">
+                      <img src={preview} alt={`Après ${index + 1}`} className="w-full h-24 object-cover rounded-lg" />
+                      <button
+                        onClick={() => removePhoto(index, 'after')}
+                        className="absolute top-1 right-1 bg-red-500 text-white rounded-full p-1 opacity-0 group-hover:opacity-100 transition-opacity"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Problèmes rencontrés */}
+          <div>
+            <label className="block text-sm font-semibold text-gray-900 mb-2">
+              Problèmes ou difficultés rencontrés
+            </label>
+            <textarea
+              value={formData.issues_encountered}
+              onChange={(e) => handleInputChange('issues_encountered', e.target.value)}
+              placeholder="Décrivez les problèmes ou difficultés rencontrés lors de l'intervention..."
+              className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-transparent resize-none"
+              rows={3}
+            />
+          </div>
+
+          {/* Observations */}
+          <div>
+            <label className="block text-sm font-semibold text-gray-900 mb-2">
+              Observations générales
+            </label>
+            <textarea
+              value={formData.observations}
+              onChange={(e) => handleInputChange('observations', e.target.value)}
+              placeholder="Autres observations ou remarques..."
+              className="w-full px-4 py-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-green-500 focus:border-transparent resize-none"
+              rows={3}
+            />
+          </div>
+
+          {/* Boutons d'action */}
+          <div className="flex items-center justify-between pt-6 border-t border-gray-200">
+            <Button variant="outline" onClick={onCancel} disabled={loading}>
+              Annuler
+            </Button>
+            <Button
+              onClick={handleSubmit}
+              disabled={loading || !formData.works_performed}
+              className="bg-gradient-to-r from-green-500 to-green-600 hover:from-green-600 hover:to-green-700 text-white"
+            >
+              {loading ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Enregistrement...
+                </>
+              ) : (
+                <>
+                  <Save className="h-4 w-4 mr-2" />
+                  Enregistrer le compte-rendu
+                </>
+              )}
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
     </div>
   );
 };
@@ -3156,7 +5248,11 @@ const createInitialSections = (generateReferenceNumber) => ([
       { id: 'nom', label: 'Nom', value: '', required: true, type: 'text' },
       { id: 'prenom', label: 'Prénom', value: '', required: true, type: 'text' },
       { id: 'adresse', label: 'Adresse', value: '', required: true, type: 'textarea' },
-      { id: 'numero_recherche', label: 'Numéro de recherche', value: generateReferenceNumber(), required: false, type: 'text', readonly: true }
+      { id: 'ville', label: 'Ville', value: '', required: true, type: 'text' },
+      { id: 'code_postal', label: 'Code postal', value: '', required: true, type: 'text' },
+      { id: 'numero_recherche', label: 'Numéro de recherche', value: generateReferenceNumber(), required: false, type: 'text', readonly: true },
+      { id: 'client_type', label: 'Type de client', value: 'occasional', required: false, type: 'radio', options: [{value: 'occasional', label: 'Client occasionnel (pas de suivi)'}, {value: 'recurring', label: 'Client récurrent (avec suivi)'}] },
+      { id: 'client_id', label: 'Client', value: '', required: false, type: 'select', dependsOn: 'client_type', dependsOnValue: 'recurring', options: [] }
     ]
   },
   {
@@ -3188,9 +5284,10 @@ const createInitialSections = (generateReferenceNumber) => ([
 ]);
 
 // Enhanced Search Form Component with Dynamic Sections
-const SearchForm = forwardRef(({ onDraftEvent }, ref) => {
+const SearchForm = forwardRef(({ onDraftEvent, searchType = 'terrain', initialSearch = null, onSearchLoaded, recentlyFinalizedRef }, ref) => {
   const { token } = useAuth();
   const [loading, setLoading] = useState(false);
+  const [clients, setClients] = useState([]);
   const [photoPreview, setPhotoPreview] = useState([]); // Photos en attente d'upload (nouveaux fichiers)
   const [savedPhotos, setSavedPhotos] = useState([]); // Photos déjà sauvegardées sur le serveur
   const [profilePhoto, setProfilePhoto] = useState(null);
@@ -3472,6 +5569,7 @@ const SearchForm = forwardRef(({ onDraftEvent }, ref) => {
 
   // Auto-save brouillon
   const [draftId, setDraftId] = useState(null);
+  const [originalSearchStatus, setOriginalSearchStatus] = useState(null); // Conserver le statut original
   const [autoSaveState, setAutoSaveState] = useState(() => ({ ...INITIAL_AUTO_SAVE_STATE }));
   const [hasUserInteraction, setHasUserInteraction] = useState(false);
   const [hasPendingChanges, setHasPendingChanges] = useState(false);
@@ -3487,21 +5585,45 @@ const SearchForm = forwardRef(({ onDraftEvent }, ref) => {
     const nomField = generalSection?.fields?.find((field) => field.id === 'nom');
     const prenomField = generalSection?.fields?.find((field) => field.id === 'prenom');
     const addressField = generalSection?.fields?.find((field) => field.id === 'adresse');
+    const villeField = generalSection?.fields?.find((field) => field.id === 'ville');
+    const codePostalField = generalSection?.fields?.find((field) => field.id === 'code_postal');
+    const clientTypeField = generalSection?.fields?.find((field) => field.id === 'client_type');
+    const clientIdField = generalSection?.fields?.find((field) => field.id === 'client_id');
     const descriptionSection = sections.find((section) => section.id === 'description');
-    const additionalContent = sections
-      .filter((section) =>
-        section.value && !['general_info', 'description'].includes(section.id)
-      )
-      .map((section) => `**${section.title}:**\n${section.value}`)
-      .join('\n\n');
+    
+    // Sauvegarder les sections personnalisées comme JSON
+    const customSections = sections
+      .filter(s => s.type === 'custom')
+      .map(s => ({ id: s.id, title: s.title, value: s.value || '' }));
+    
+    const observationsSection = sections.find(s => s.id === 'observations');
+    const observationsText = observationsSection?.value || '';
+    
+    // Combiner observations texte + sections custom en JSON
+    const observationsData = {
+      text: observationsText,
+      customSections: customSections
+    };
 
-    return {
+    const payload = {
       nom: nomField?.value || '',
       prenom: prenomField?.value || '',
       location: addressField?.value || '',
+      ville: villeField?.value || '',
+      code_postal: codePostalField?.value || '',
       description: descriptionSection?.value || '',
-      observations: additionalContent || ''
+      observations: JSON.stringify(observationsData)
     };
+    
+    // Ajouter client_id uniquement si type = recurring et un client est sélectionné
+    if (clientTypeField?.value === 'recurring' && clientIdField?.value) {
+      payload.client_id = clientIdField.value;
+    } else {
+      // Explicitement null pour les clients occasionnels
+      payload.client_id = null;
+    }
+    
+    return payload;
   }, [sections]);
 
   const createDraftIfNeeded = useCallback(async ({ forceCreation = false } = {}) => {
@@ -3562,6 +5684,12 @@ const SearchForm = forwardRef(({ onDraftEvent }, ref) => {
   }, [draftId, hasUserInteraction, onDraftEvent, resolveToken, sections]);
 
   const autoSaveDraft = useCallback(async ({ forceSave = false } = {}) => {
+    // BLOQUER l'auto-save si une finalisation est en cours
+    if (isFinalizingRef.current && !forceSave) {
+      if (DEBUG_MODE) console.log('⏸️ Auto-save bloqué : finalisation en cours');
+      return false;
+    }
+    
     const authToken = resolveToken();
     if (!authToken) {
       return false;
@@ -3587,21 +5715,16 @@ const SearchForm = forwardRef(({ onDraftEvent }, ref) => {
       // 1. Sauvegarder les données textuelles
       const payload = buildPayloadFromSections();
       try {
-        await axios.patch(`${API}/searches/${targetDraftId}`, { ...payload, status: 'DRAFT' }, {
+        // NE PAS envoyer de status lors de l'auto-save pour ne pas écraser un status ACTIVE
+        // Le status DRAFT est appliqué uniquement lors de la création initiale du brouillon
+        await axios.patch(`${API}/searches/${targetDraftId}`, { ...payload, search_type: searchType?.toUpperCase() }, {
           headers: { Authorization: `Bearer ${authToken}` }
         });
       } catch (patchError) {
-        // Si le draft n'existe plus (404), en créer un nouveau
+        // Si le draft n'existe plus (404), c'est une erreur critique
         if (patchError.response?.status === 404) {
-          console.log('⚠️ Draft inexistant, création d\'un nouveau...');
-          const newDraft = await createDraftIfNeeded({ forceCreation: true });
-          if (!newDraft) {
-            throw new Error('Impossible de créer un nouveau draft');
-          }
-          // Réessayer avec le nouveau draft ID
-          await axios.patch(`${API}/searches/${newDraft.id}`, { ...payload, status: 'DRAFT' }, {
-            headers: { Authorization: `Bearer ${authToken}` }
-          });
+          console.error('❌ Draft introuvable en base de données:', targetDraftId);
+          throw new Error('Le brouillon a été supprimé. Veuillez recharger la page.');
         } else {
           throw patchError;
         }
@@ -3628,7 +5751,13 @@ const SearchForm = forwardRef(({ onDraftEvent }, ref) => {
         );
 
         if (uploadResponse.data.photos) {
-          setSavedPhotos(prev => [...prev, ...uploadResponse.data.photos]);
+          // Éviter les doublons
+          setSavedPhotos(prev => {
+            const existingFilenames = new Set(prev.map(p => p.filename));
+            const newPhotos = uploadResponse.data.photos.filter(p => !existingFilenames.has(p.filename));
+            return [...prev, ...newPhotos];
+          });
+          
           const profilePhotoData = uploadResponse.data.photos.find(p => p.is_profile);
           if (profilePhotoData) {
             const photoUrl = profilePhotoData.url || `${API}/searches/${targetDraftId}/photos/${profilePhotoData.filename}`;
@@ -3672,13 +5801,19 @@ const SearchForm = forwardRef(({ onDraftEvent }, ref) => {
                       filename: p.filename,
                       name: p.original_name || p.filename
                     }));
+                    
                     // Remplacer UNIQUEMENT les previews locales (avec file) par les URLs Supabase
-                    // Garder les photos qui ont déjà un filename (déjà sur le serveur)
+                    // Garder uniquement les photos déjà sur le serveur qui ne sont PAS dans les nouvelles photos
+                    const newFilenames = new Set(savedSectionPhotos.map(p => p.filename));
+                    const existingPhotos = s.photos.filter(photo => 
+                      photo.filename && !newFilenames.has(photo.filename) // Éviter les doublons
+                    );
+                    
                     return {
                       ...s,
                       photos: [
-                        ...s.photos.filter(photo => photo.filename), // Garder les photos déjà sur le serveur
-                        ...savedSectionPhotos // Ajouter les nouvelles photos sauvegardées
+                        ...existingPhotos, // Photos existantes (pas de doublons)
+                        ...savedSectionPhotos // Nouvelles photos sauvegardées
                       ]
                     };
                   }
@@ -3717,7 +5852,12 @@ const SearchForm = forwardRef(({ onDraftEvent }, ref) => {
         );
 
         if (uploadResponse.data.photos) {
-          setSavedPhotos(prev => [...prev, ...uploadResponse.data.photos]);
+          // Éviter les doublons en vérifiant les filenames
+          setSavedPhotos(prev => {
+            const existingFilenames = new Set(prev.map(p => p.filename));
+            const newPhotos = uploadResponse.data.photos.filter(p => !existingFilenames.has(p.filename));
+            return [...prev, ...newPhotos];
+          });
         }
         
         photoPreview.forEach(photo => {
@@ -3810,6 +5950,49 @@ const SearchForm = forwardRef(({ onDraftEvent }, ref) => {
     */
   }, [token, draftId, createDraftIfNeeded]);
 
+  // Charger la liste des clients au montage du composant
+  useEffect(() => {
+    const loadClients = async () => {
+      try {
+        const authToken = resolveToken();
+        if (!authToken) return;
+        
+        const response = await axios.get(`${API}/clients`, {
+          headers: { Authorization: `Bearer ${authToken}` }
+        });
+        
+        const clientList = response.data || [];
+        setClients(clientList);
+        
+        // Mettre à jour les options du champ client_id
+        setSections(prev => prev.map(section => {
+          if (section.id === 'general_info') {
+            return {
+              ...section,
+              fields: section.fields?.map(field => {
+                if (field.id === 'client_id') {
+                  return {
+                    ...field,
+                    options: clientList.map(c => ({
+                      value: c.id,
+                      label: `${c.nom} ${c.prenom || ''}`.trim()
+                    }))
+                  };
+                }
+                return field;
+              })
+            };
+          }
+          return section;
+        }));
+      } catch (error) {
+        console.error('Erreur chargement clients:', error);
+      }
+    };
+    
+    loadClients();
+  }, [resolveToken]);
+
   useEffect(() => {
     return () => {
       if (autoSaveTimer.current) {
@@ -3840,6 +6023,11 @@ const SearchForm = forwardRef(({ onDraftEvent }, ref) => {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
+    
+    // BLOQUER l'auto-save pendant toute la durée de la finalisation
+    isFinalizingRef.current = true;
+    if (DEBUG_MODE) console.log('🔒 Finalisation démarrée - Auto-save désactivé');
+    
     try {
       const authToken = resolveToken();
       if (!authToken) {
@@ -3855,33 +6043,162 @@ const SearchForm = forwardRef(({ onDraftEvent }, ref) => {
       if (!nameField?.value?.trim() || !firstNameField?.value?.trim() || !addressField?.value?.trim()) {
         throw new Error('Veuillez remplir tous les champs obligatoires : Nom, Prénom et Adresse');
       }
-      
-      const ensuredDraftId = draftId || await createDraftIfNeeded({ forceCreation: true });
-      if (!ensuredDraftId) {
-        throw new Error('Impossible de créer le brouillon');
-      }
 
       const payload = buildPayloadFromSections();
-      await axios.patch(`${API}/searches/${ensuredDraftId}`, { ...payload, status: 'ACTIVE' }, {
-        headers: { Authorization: `Bearer ${authToken}` }
-      });
-      setSubmitStatus({ type: 'success', message: 'Recherche finalisée', location: 'Base de données' });
+      let ensuredDraftId;
+      let response;
+
+      // Si un brouillon existe (reprise d'une recherche), le mettre à jour
+      if (draftId) {
+        console.log('🔄 Finalisation d\'un brouillon existant:', draftId);
+        ensuredDraftId = draftId;
+        
+        // Sauvegarder les photos avant finalisation
+        console.log('📸 Sauvegarde des photos...');
+        await autoSaveDraft({ forceSave: true });
+        console.log('✅ Photos sauvegardées');
+        
+        // Mettre à jour la recherche en préservant son statut original (SHARED, ACTIVE, etc.)
+        const statusToUse = originalSearchStatus || 'ACTIVE';
+        console.log('📊 Statut utilisé pour la mise à jour:', statusToUse);
+        response = await axios.patch(`${API}/searches/${ensuredDraftId}`, { ...payload, status: statusToUse, search_type: searchType?.toUpperCase() }, {
+          headers: { Authorization: `Bearer ${authToken}` }
+        });
+      } else {
+        // Pas de brouillon = créer temporairement puis immédiatement mettre en ACTIVE
+        console.log('✨ Création directe d\'une recherche ACTIVE (sans brouillon intermédiaire)');
+        
+        // Étape 1 : Créer un brouillon temporaire
+        const draftResponse = await axios.post(`${API}/searches/draft`, {}, {
+          headers: { Authorization: `Bearer ${authToken}` }
+        });
+        ensuredDraftId = draftResponse.data?.search?.id;
+        console.log('📝 Brouillon temporaire créé:', ensuredDraftId);
+        
+        // Étape 2 : Immédiatement le passer en ACTIVE
+        response = await axios.patch(`${API}/searches/${ensuredDraftId}`, { ...payload, status: 'ACTIVE', search_type: searchType?.toUpperCase() }, {
+          headers: { Authorization: `Bearer ${authToken}` }
+        });
+        console.log('✅ Immédiatement passé en ACTIVE');
+        
+        // Uploader les photos après création
+        if (ensuredDraftId && (photoPreview.length > 0 || profilePhoto)) {
+          console.log('📸 Upload des photos...');
+          
+          // Photo de profil
+          if (profilePhoto) {
+            const formData = new FormData();
+            formData.append('files', profilePhoto);
+            formData.append('is_profile', 'true');
+            formData.append('section_id', 'profile');
+            await axios.post(`${API}/searches/${ensuredDraftId}/photos`, formData, {
+              headers: { Authorization: `Bearer ${authToken}`, 'Content-Type': 'multipart/form-data' }
+            });
+          }
+          
+          // Photos de sections
+          for (const section of sections) {
+            if (section.photos && section.photos.length > 0) {
+              const unsavedPhotos = section.photos.filter(photo => photo.file);
+              if (unsavedPhotos.length > 0) {
+                const formData = new FormData();
+                unsavedPhotos.forEach(photo => formData.append('files', photo.file));
+                formData.append('section_id', section.id);
+                await axios.post(`${API}/searches/${ensuredDraftId}/photos`, formData, {
+                  headers: { Authorization: `Bearer ${authToken}`, 'Content-Type': 'multipart/form-data' }
+                });
+              }
+            }
+          }
+          
+          console.log('✅ Photos uploadées');
+        }
+      }
+      
+      console.log('✅ Recherche finalisée sur le serveur:', response.data);
+      console.log('🔍 Status retourné par le backend:', response.data?.search?.status);
+      
+      // Ajouter au Set des recherches récemment finalisées (exclusion de la modal brouillons)
+      // Vérifier que recentlyFinalizedRef existe (optionnel dans certains contextes comme le menu Bureau)
+      if (recentlyFinalizedRef?.current) {
+        recentlyFinalizedRef.current.add(ensuredDraftId);
+        console.log('🔐 Recherche', ensuredDraftId, 'marquée comme récemment finalisée');
+        // Nettoyer après 60 secondes
+        setTimeout(() => {
+          recentlyFinalizedRef.current.delete(ensuredDraftId);
+          console.log('🔓 Recherche', ensuredDraftId, 'retirée du cache de finalisation');
+        }, 60000);
+      }
+      
+      // Émettre un événement pour notifier que les recherches doivent être rechargées
+      // Petit délai pour laisser le temps au composant SearchHistory de se remonter
+      console.log('📡 Émission de l\'événement searchFinalized avec:', { searchId: ensuredDraftId });
+      setTimeout(() => {
+        window.dispatchEvent(new CustomEvent('searchFinalized', { detail: { searchId: ensuredDraftId } }));
+        console.log('✨ Événement searchFinalized émis!');
+      }, 100);
+      
+      // Notifier le parent que la recherche n'est plus un brouillon
+      if (onDraftEvent) {
+        onDraftEvent({ type: 'finalized', draftId: ensuredDraftId });
+        console.log('🔄 Parent notifié : brouillon finalisé et retiré de la liste');
+      }
+      
+      setSubmitStatus({ type: 'success', message: 'Recherche finalisée avec succès! Elle apparaît maintenant dans "Mes Recherches".', location: 'Base de données' });
       setTimeout(() => setSubmitStatus(null), 5000);
-    // Réinitialisation
-    setSections(createInitialSections(generateReferenceNumber));
-    setPhotoPreview([]);
-    setProfilePhoto(null);
-    setProfilePhotoPreview(null);
+    
+    // Réinitialisation complète UNIQUEMENT si ce n'est PAS une édition
+    // En mode édition (initialSearch fourni), on garde le formulaire intact pour que l'utilisateur voie ses modifications
+    if (!initialSearch) {
+      console.log('🔄 Mode création: réinitialisation du formulaire');
+      
+      // Nettoyer les URLs blob si présentes
+      if (profilePhotoPreview && profilePhotoPreview.startsWith('blob:')) {
+        URL.revokeObjectURL(profilePhotoPreview);
+      }
+      photoPreview.forEach(photo => {
+        if (photo.url && photo.url.startsWith('blob:')) {
+          URL.revokeObjectURL(photo.url);
+        }
+      });
+      
+      // Nettoyer TOUTES les photos des sections (y compris les URLs blob)
+      sections.forEach(section => {
+        if (section.photos && Array.isArray(section.photos)) {
+          section.photos.forEach(photo => {
+            if (photo.url && photo.url.startsWith('blob:')) {
+              URL.revokeObjectURL(photo.url);
+            }
+          });
+        }
+      });
+      
+      // Créer de nouvelles sections complètement vides (pas de photos, pas de fields avec values)
+      const freshSections = createInitialSections(generateReferenceNumber);
+      setSections(freshSections);
+      setPhotoPreview([]);
+      setSavedPhotos([]); // ✅ Vider les photos sauvegardées
+      setProfilePhoto(null);
+      setProfilePhotoPreview(null);
       setDraftId(null);
-  initialDraftRequested.current = false;
+      initialDraftRequested.current = false;
       setHasUserInteraction(false);
       setHasPendingChanges(false);
       setAutoSaveState({ ...INITIAL_AUTO_SAVE_STATE });
-      onDraftEvent?.({ type: 'finalized', draftId: ensuredDraftId });
+      
       if (autoSaveTimer.current) {
         clearTimeout(autoSaveTimer.current);
         autoSaveTimer.current = null;
       }
+    } else {
+      console.log('✏️ Mode édition: conservation du formulaire avec les modifications');
+      // En mode édition, on garde le formulaire tel quel
+      // L'utilisateur verra ses modifications et pourra fermer la modal manuellement
+      setHasPendingChanges(false); // Pas de changements en attente après la sauvegarde
+    }
+    
+    // Notifier le parent dans tous les cas
+    onDraftEvent?.({ type: 'finalized', draftId: ensuredDraftId });
     } catch (e) {
       let msg = 'Erreur lors de la finalisation';
       if (e.response?.data?.detail) msg = e.response.data.detail;
@@ -3889,12 +6206,16 @@ const SearchForm = forwardRef(({ onDraftEvent }, ref) => {
       setSubmitStatus({ type: 'error', message: msg });
       setTimeout(() => setSubmitStatus(null), 8000);
     } finally {
+      // DÉBLOQUER l'auto-save
+      isFinalizingRef.current = false;
+      console.log('🔓 Finalisation terminée - Auto-save réactivé');
       setLoading(false);
     }
   };
 
   // New functions for enhanced form
   const [submitStatus, setSubmitStatus] = useState(null);
+  const isFinalizingRef = useRef(false); // Flag pour bloquer l'auto-save pendant finalisation
 
   const handleSectionTitleChange = (sectionId, newTitle) => {
     setHasUserInteraction(true);
@@ -3993,6 +6314,149 @@ const SearchForm = forwardRef(({ onDraftEvent }, ref) => {
     }));
   };
 
+  // Fonction pour charger un draft (utilisée par useImperativeHandle et useEffect)
+  const loadDraft = useCallback((draft) => {
+    if (!draft) {
+      console.log('❌ [loadDraft] Pas de brouillon fourni');
+      return;
+    }
+
+    console.log('📥 [loadDraft] Chargement du brouillon:', draft.id, 'photos:', draft.photos?.length || 0);
+
+    if (autoSaveTimer.current) {
+      clearTimeout(autoSaveTimer.current);
+      autoSaveTimer.current = null;
+    }
+
+    const baseSections = createInitialSections(generateReferenceNumber).map((section) => {
+      if (section.id === 'general_info') {
+        return {
+          ...section,
+          fields: section.fields?.map((field) => {
+            if (field.id === 'nom') {
+              return { ...field, value: draft.nom || '' };
+            }
+            if (field.id === 'prenom') {
+              return { ...field, value: draft.prenom || '' };
+            }
+            if (field.id === 'adresse') {
+              return { ...field, value: draft.location || '' };
+            }
+            if (field.id === 'ville') {
+              return { ...field, value: draft.ville || '' };
+            }
+            if (field.id === 'code_postal') {
+              return { ...field, value: draft.code_postal || '' };
+            }
+            return field;
+          })
+        };
+      }
+      if (section.id === 'description') {
+        return { ...section, value: draft.description || '' };
+      }
+      if (section.id === 'observations') {
+        // Parser le JSON pour récupérer le texte observations
+        try {
+          const observationsData = JSON.parse(draft.observations || '{}');
+          return { ...section, value: observationsData.text || '' };
+        } catch (e) {
+          // Si ce n'est pas du JSON, c'est l'ancien format texte simple
+          return { ...section, value: draft.observations || '' };
+        }
+      }
+      return section;
+    });
+
+    setDraftId(draft.id);
+    setPhotoPreview([]);
+    setHasUserInteraction(false);
+    setHasPendingChanges(false);
+    
+    // Parser et restaurer les sections personnalisées
+    let customSectionsToAdd = [];
+    try {
+      const observationsData = JSON.parse(draft.observations || '{}');
+      if (observationsData.customSections && Array.isArray(observationsData.customSections)) {
+        customSectionsToAdd = observationsData.customSections.map(cs => ({
+          id: cs.id,
+          type: 'custom',
+          title: cs.title,
+          icon: Plus,
+          value: cs.value,
+          required: false,
+          placeholder: 'Décrivez le contenu de cette section...',
+          fieldType: 'textarea',
+          rows: 4,
+          removable: true,
+          collapsed: false,
+          photos: []
+        }));
+        console.log(`✅ [loadDraft] ${customSectionsToAdd.length} sections personnalisées restaurées`);
+      }
+    } catch (e) {
+      console.log('⚠️ [loadDraft] Pas de sections personnalisées ou ancien format');
+    }
+
+    // Charger les photos existantes depuis le serveur
+    if (draft.photos && Array.isArray(draft.photos) && draft.photos.length > 0) {
+      console.log('📸 [loadDraft] Photos trouvées:', draft.photos);
+      setSavedPhotos(draft.photos);
+      
+      // A. Restaurer la photo de profil si elle existe
+      const profilePhotoData = draft.photos.find(p => p.is_profile);
+      console.log('🖼️ [loadDraft] Photo de profil:', profilePhotoData);
+      if (profilePhotoData) {
+        const photoUrl = profilePhotoData.url || `${API}/searches/${draft.id}/photos/${profilePhotoData.filename}`;
+        console.log('✅ [loadDraft] URL photo de profil:', photoUrl);
+        setProfilePhotoPreview(photoUrl);
+        setProfilePhoto(null);
+      } else {
+        console.log('⚠️ [loadDraft] Aucune photo de profil trouvée');
+        setProfilePhoto(null);
+        setProfilePhotoPreview(null);
+      }
+
+      // B. Distribuer les photos dans leurs sections respectives (sections de base + custom)
+      const allSections = [...baseSections, ...customSectionsToAdd];
+      const sectionsWithPhotos = allSections.map(section => {
+        // Filtrer les photos qui appartiennent à cette section
+        const sectionPhotos = draft.photos
+          .filter(p => p.section_id === section.id && !p.is_profile)
+          .map(p => ({
+            url: p.url || `${API}/searches/${draft.id}/photos/${p.filename}`,
+            filename: p.filename,
+            name: p.original_name || p.filename
+          }));
+
+        if (sectionPhotos.length > 0) {
+          console.log(`📸 [loadDraft] Section ${section.id}: ${sectionPhotos.length} photos chargées`);
+          return { ...section, photos: sectionPhotos };
+        }
+        return section;
+      });
+
+      console.log('✅ [loadDraft] Sections avec photos distribuées:', sectionsWithPhotos.filter(s => s.photos?.length > 0).map(s => ({ id: s.id, photosCount: s.photos.length })));
+      setSections(sectionsWithPhotos);
+    } else {
+      setSavedPhotos([]);
+      setProfilePhoto(null);
+      setProfilePhotoPreview(null);
+      setSections([...baseSections, ...customSectionsToAdd]);
+    }
+
+    // Définir le draftId pour que la finalisation sache qu'il s'agit d'une édition
+    setDraftId(draft.id);
+    console.log('✅ [loadDraft] draftId défini:', draft.id);
+    
+    // Stocker le statut original pour le préserver lors de la finalisation
+    setOriginalSearchStatus(draft.status);
+    console.log('📊 [loadDraft] Statut original conservé:', draft.status);
+
+    const lastSaved = draft.updated_at || draft.created_at;
+    setAutoSaveState({ saving: false, lastSaved: lastSaved ? new Date(lastSaved) : null, error: null });
+  }, [generateReferenceNumber]);
+
   useImperativeHandle(ref, () => ({
     forceAutoSave: async () => {
       if (autoSaveTimer.current) {
@@ -4001,100 +6465,25 @@ const SearchForm = forwardRef(({ onDraftEvent }, ref) => {
       }
       return autoSaveDraft({ forceSave: true });
     },
-    loadDraft: (draft) => {
-      if (!draft) {
-        return;
-      }
-
-      if (autoSaveTimer.current) {
-        clearTimeout(autoSaveTimer.current);
-        autoSaveTimer.current = null;
-      }
-
-      const baseSections = createInitialSections(generateReferenceNumber).map((section) => {
-        if (section.id === 'general_info') {
-          return {
-            ...section,
-            fields: section.fields?.map((field) => {
-              if (field.id === 'nom') {
-                return { ...field, value: draft.nom || '' };
-              }
-              if (field.id === 'prenom') {
-                return { ...field, value: draft.prenom || '' };
-              }
-              if (field.id === 'adresse') {
-                return { ...field, value: draft.location || '' };
-              }
-              return field;
-            })
-          };
-        }
-        if (section.id === 'description') {
-          return { ...section, value: draft.description || '' };
-        }
-        if (section.id === 'observations') {
-          return { ...section, value: draft.observations || '' };
-        }
-        return section;
-      });
-
-      setDraftId(draft.id);
-      setPhotoPreview([]);
-      setHasUserInteraction(false);
-      setHasPendingChanges(false);
-
-      // Charger les photos existantes depuis le serveur
-      if (draft.photos && Array.isArray(draft.photos) && draft.photos.length > 0) {
-        setSavedPhotos(draft.photos);
-        
-        // A. Restaurer la photo de profil si elle existe
-        const profilePhotoData = draft.photos.find(p => p.is_profile);
-        if (profilePhotoData) {
-          const photoUrl = profilePhotoData.url || `${API}/searches/${draft.id}/photos/${profilePhotoData.filename}`;
-          setProfilePhotoPreview(photoUrl);
-          setProfilePhoto(null);
-        } else {
-          setProfilePhoto(null);
-          setProfilePhotoPreview(null);
-        }
-
-        // B. Distribuer les photos dans leurs sections respectives
-        const sectionsWithPhotos = baseSections.map(section => {
-          // Filtrer les photos qui appartiennent à cette section
-          const sectionPhotos = draft.photos
-            .filter(p => p.section_id === section.id && !p.is_profile)
-            .map(p => ({
-              url: p.url || `${API}/searches/${draft.id}/photos/${p.filename}`,
-              filename: p.filename,
-              name: p.original_name || p.filename
-            }));
-
-          if (sectionPhotos.length > 0) {
-            console.log(`📸 [loadDraft] Section ${section.id}: ${sectionPhotos.length} photos chargées`);
-            return { ...section, photos: sectionPhotos };
-          }
-          return section;
-        });
-
-        console.log('✅ [loadDraft] Sections avec photos distribuées:', sectionsWithPhotos.filter(s => s.photos?.length > 0).map(s => ({ id: s.id, photosCount: s.photos.length })));
-        setSections(sectionsWithPhotos);
-      } else {
-        setSavedPhotos([]);
-        setProfilePhoto(null);
-        setProfilePhotoPreview(null);
-        setSections(baseSections);
-      }
-
-      const lastSaved = draft.updated_at || draft.created_at;
-      setAutoSaveState({ saving: false, lastSaved: lastSaved ? new Date(lastSaved) : null, error: null });
-    },
+    loadDraft: loadDraft,
     getDraftId: () => draftId,
     ensureDraft: (options = {}) => createDraftIfNeeded({ forceCreation: false, ...options })
   }), [autoSaveDraft, createDraftIfNeeded, draftId, generateReferenceNumber]);
 
-  // Charger automatiquement le draft existant au montage du composant
+  // Charger automatiquement le draft existant ou initialSearch au montage du composant
   useEffect(() => {
     const loadExistingDraft = async () => {
+      // Priorité 1: Charger initialSearch si fourni
+      if (initialSearch) {
+        console.log('🔄 Chargement de initialSearch:', initialSearch.id);
+        loadDraft(initialSearch);
+        if (onSearchLoaded) {
+          onSearchLoaded();
+        }
+        return;
+      }
+      
+      // Priorité 2: Charger le draft existant
       try {
         const response = await axios.get(`${API}/searches`, {
           headers: { Authorization: `Bearer ${token}` },
@@ -4190,12 +6579,12 @@ const SearchForm = forwardRef(({ onDraftEvent }, ref) => {
       }
     };
 
-    // NOTE: Chargement automatique DÉSACTIVÉ
+    // NOTE: Chargement automatique DÉSACTIVÉ sauf si initialSearch est fourni
     // L'utilisateur doit charger manuellement via "Brouillon en attente" ou "Modifier"
-    // if (token && !draftId) {
-    //   loadExistingDraft();
-    // }
-  }, [token, draftId, generateReferenceNumber]); // Dépendances correctes
+    if (token && !draftId) {
+      loadExistingDraft();
+    }
+  }, [token, draftId, generateReferenceNumber, initialSearch, onSearchLoaded]);
 
   return (
     <div className="max-w-4xl mx-auto">
@@ -4205,7 +6594,9 @@ const SearchForm = forwardRef(({ onDraftEvent }, ref) => {
             <div className="w-16 h-16 bg-gray-900 rounded-xl flex items-center justify-center mx-auto mb-4">
               <Search className="h-8 w-8 text-white" />
             </div>
-            <CardTitle className="text-2xl font-semibold text-gray-900">Nouvelle Recherche Terrain</CardTitle>
+            <CardTitle className="text-2xl font-semibold text-gray-900">
+              {searchType === 'rapport' ? 'Nouveau Compte-Rendu Chantier' : searchType === 'infiltration' ? "Nouvelle Recherche d'Infiltration" : 'Nouvelle Recherche'}
+            </CardTitle>
             <CardDescription className="text-gray-600 mt-2">
               Formulaire personnalisable avec sections modulaires
             </CardDescription>
@@ -4320,13 +6711,50 @@ const SearchForm = forwardRef(({ onDraftEvent }, ref) => {
                       {section.fieldType === 'multiple' && section.fields ? (
                         <div className="space-y-4 mb-6">
                           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            {section.fields.map((field) => (
-                              <div key={field.id} className="space-y-2">
+                            {section.fields.map((field) => {
+                              // Gérer les champs conditionnels
+                              if (field.dependsOn) {
+                                const dependentField = section.fields.find(f => f.id === field.dependsOn);
+                                if (dependentField && dependentField.value !== field.dependsOnValue) {
+                                  return null; // Ne pas afficher si la condition n'est pas remplie
+                                }
+                              }
+                              
+                              return (
+                              <div key={field.id} className="space-y-2" style={field.type === 'radio' ? {gridColumn: '1 / -1'} : {}}>
                                 <label className="block text-sm font-medium text-gray-700">
                                   {field.label}
                                   {field.required && <span className="text-red-500 ml-1">*</span>}
                                 </label>
-                                {field.type === 'textarea' ? (
+                                {field.type === 'radio' ? (
+                                  <div className="flex gap-4 p-4 bg-gray-50 rounded-xl">
+                                    {field.options?.map(option => (
+                                      <label key={option.value} className="flex items-center gap-2 cursor-pointer">
+                                        <input
+                                          type="radio"
+                                          name={field.id}
+                                          value={option.value}
+                                          checked={field.value === option.value}
+                                          onChange={(e) => handleFieldChange(section.id, field.id, e.target.value)}
+                                          className="w-4 h-4 text-gray-900"
+                                        />
+                                        <span className="text-sm">{option.label}</span>
+                                      </label>
+                                    ))}
+                                  </div>
+                                ) : field.type === 'select' ? (
+                                  <select
+                                    value={field.value}
+                                    onChange={(e) => handleFieldChange(section.id, field.id, e.target.value)}
+                                    className="w-full rounded-xl border border-gray-200 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/10 transition-colors duration-200 text-base p-4"
+                                    required={field.required}
+                                  >
+                                    <option value="">-- Sélectionner un client --</option>
+                                    {field.options?.map(option => (
+                                      <option key={option.value} value={option.value}>{option.label}</option>
+                                    ))}
+                                  </select>
+                                ) : field.type === 'textarea' ? (
                                   <textarea
                                     value={field.value}
                                     onChange={(e) => handleFieldChange(section.id, field.id, e.target.value)}
@@ -4348,7 +6776,8 @@ const SearchForm = forwardRef(({ onDraftEvent }, ref) => {
                                   />
                                 )}
                               </div>
-                            ))}
+                              );
+                            })}
                           </div>
                           
                           {/* Profile Photo for general_info section - Design amélioré avec fond */}
@@ -4585,26 +7014,6 @@ const SearchForm = forwardRef(({ onDraftEvent }, ref) => {
 
             {/* Enhanced Submit Button */}
             <div className="pt-6 border-t border-gray-200 space-y-3">
-              {/* Bouton Sauvegarder le brouillon */}
-              <Button 
-                type="button"
-                onClick={() => autoSaveDraft({ forceSave: true })}
-                disabled={autoSaveState.saving || !sections.find(s => s.id === 'general_info')?.fields?.every(f => f.value?.trim())}
-                className="w-full bg-blue-600 hover:bg-blue-700 text-white rounded-xl py-3 text-base font-medium transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {autoSaveState.saving ? (
-                  <div className="flex items-center justify-center space-x-3">
-                    <Loader2 className="h-5 w-5 animate-spin" />
-                    <span>Sauvegarde en cours...</span>
-                  </div>
-                ) : (
-                  <div className="flex items-center justify-center space-x-3">
-                    <Save className="h-5 w-5" />
-                    <span>Sauvegarder le brouillon</span>
-                  </div>
-                )}
-              </Button>
-              
               {/* Bouton Finaliser la recherche */}
               <Button 
                 type="submit" 
@@ -4663,13 +7072,16 @@ const SearchForm = forwardRef(({ onDraftEvent }, ref) => {
       {showLightbox && (
         <div 
           className="fixed inset-0 bg-black/90 z-[9999] flex items-center justify-center p-4"
-          onClick={() => {
-            setShowLightbox(false);
-            setLightboxImage(null);
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              setShowLightbox(false);
+              setLightboxImage(null);
+            }
           }}
         >
           <button
-            onClick={() => {
+            onClick={(e) => {
+              e.stopPropagation();
               setShowLightbox(false);
               setLightboxImage(null);
             }}
@@ -4702,7 +7114,7 @@ SearchForm.displayName = 'SearchForm';
 export { SearchForm, AuthContext };
 
 // Apple-style Search History Component
-const SearchHistory = () => {
+const SearchHistory = ({ onEditSearch }) => {
   const [searches, setSearches] = useState([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState('all');
@@ -4723,6 +7135,24 @@ const SearchHistory = () => {
     loadSearches();
   }, [page, sortBy, sortDir]);
 
+  // Écouter l'événement de finalisation de recherche
+  useEffect(() => {
+    const handleSearchFinalized = (event) => {
+      console.log('🔔 [SearchHistory] Événement searchFinalized reçu!', event.detail);
+      console.log('🔄 Rechargement des recherches...');
+      setLoading(true);
+      setPage(1); // Revenir à la première page pour voir la nouvelle recherche
+      loadSearches();
+    };
+    
+    console.log('✅ [SearchHistory] Écouteur d\'événement searchFinalized installé');
+    window.addEventListener('searchFinalized', handleSearchFinalized);
+    return () => {
+      console.log('❌ [SearchHistory] Écouteur d\'événement searchFinalized retiré');
+      window.removeEventListener('searchFinalized', handleSearchFinalized);
+    };
+  }, []); // Pas de dépendances - on veut juste un écouteur qui utilise la dernière version de loadSearches
+
   const loadSearches = async () => {
     try {
       const params = {
@@ -4741,16 +7171,27 @@ const SearchHistory = () => {
         params,
         headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
       });
+      
+      console.log('📥 [SearchHistory] Réponse API reçue:', response.data);
+      
       if (Array.isArray(response.data)) {
         // rétro‑compat si backend renvoie liste simple
+        console.log('📋 [SearchHistory] Format array simple, recherches:', response.data.length);
         setSearches(response.data);
         setHasMore(false);
+      } else if (response.data.data) {
+        // Format standardisé : { data: [...], count: X }
+        console.log('📋 [SearchHistory] Format standardisé, recherches:', response.data.data.length);
+        setSearches(response.data.data || []);
+        setHasMore(!!response.data.has_more);
       } else {
+        // Format pagination : { items: [...], has_more: true }
+        console.log('📋 [SearchHistory] Format pagination, recherches:', (response.data.items || []).length);
         setSearches(response.data.items || []);
         setHasMore(!!response.data.has_more);
       }
     } catch (error) {
-      console.error('Erreur chargement recherches:', error);
+      console.error('❌ [SearchHistory] Erreur chargement recherches:', error);
     } finally {
       setLoading(false);
     }
@@ -4810,8 +7251,8 @@ const SearchHistory = () => {
     setGenerating(true);
     try {
       const response = await axios({
-        method: 'post',
-        url: `${API}/reports/generate-pdf/${searchId}`,
+        method: 'get',
+        url: `${API}/searches/${searchId}/pdf`,
         responseType: 'blob',
         headers: {
           'Authorization': `Bearer ${localStorage.getItem('token')}`
@@ -4835,8 +7276,8 @@ const SearchHistory = () => {
     setGenerating(true);
     try {
       const response = await axios({
-        method: 'post',
-        url: `${API}/reports/generate-pdf/${searchId}`,
+        method: 'get',
+        url: `${API}/searches/${searchId}/pdf`,
         responseType: 'blob',
         headers: {
           'Authorization': `Bearer ${localStorage.getItem('token')}`
@@ -4961,7 +7402,25 @@ const SearchHistory = () => {
     return colors[status] || 'bg-white border-gray-200';
   };
 
+  const formatFullAddress = (search) => {
+    const capitalize = (str) => {
+      if (!str) return '';
+      return str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
+    };
+    
+    const parts = [];
+    if (search.location) parts.push(capitalize(search.location));
+    if (search.ville) parts.push(capitalize(search.ville));
+    if (search.code_postal) parts.push(search.code_postal);
+    return parts.join(', ') || 'Adresse non spécifiée';
+  };
+
   const filteredSearches = searches.filter(search => {
+    // Exclure les brouillons de "Mes Recherches" sauf si on filtre spécifiquement sur DRAFT
+    if (filter === 'all' && search.status === 'DRAFT') {
+      return false;
+    }
+    
     const matchesFilter = filter === 'all' || search.status === filter;
     const matchesSearch = !searchTerm || 
       search.location.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -4980,67 +7439,207 @@ const SearchHistory = () => {
       return `REF${year}${month}${day}-${random}`;
     }, []);
 
-    const [sections, setSections] = useState(() => createInitialSections(generateReferenceNumber));
+    // Créer TOUTES les sections comme dans SearchForm
+    const createAllSections = useCallback(() => [
+      {
+        id: 'general_info',
+        type: 'required',
+        title: 'Informations Générales',
+        icon: User,
+        value: '',
+        required: true,
+        fieldType: 'multiple',
+        collapsed: false,
+        photos: [],
+        fields: [
+          { id: 'nom', label: 'Nom', value: '', required: true, type: 'text' },
+          { id: 'prenom', label: 'Prénom', value: '', required: true, type: 'text' },
+          { id: 'adresse', label: 'Adresse', value: '', required: true, type: 'textarea' },
+          { id: 'numero_recherche', label: 'Numéro de recherche', value: generateReferenceNumber(), required: false, type: 'text', readonly: true },
+          { id: 'client_type', label: 'Type de client', value: 'occasional', required: false, type: 'radio', options: [{value: 'occasional', label: 'Client occasionnel (pas de suivi)'}, {value: 'recurring', label: 'Client récurrent (avec suivi)'}] },
+          { id: 'client_id', label: 'Client', value: '', required: false, type: 'select', dependsOn: 'client_type', dependsOnValue: 'recurring', options: [] }
+        ]
+      },
+      {
+        id: 'description',
+        type: 'required', 
+        title: 'Description de la recherche',
+        icon: FileText,
+        value: '',
+        required: true,
+        placeholder: 'Décrivez en détail ce que vous recherchez (réseaux, canalisations, câbles électriques...)',
+        fieldType: 'textarea',
+        rows: 4,
+        collapsed: false,
+        photos: []
+      },
+      {
+        id: 'observations',
+        type: 'default',
+        title: 'Observations et remarques',
+        icon: Eye,
+        value: '',
+        required: false,
+        placeholder: 'Ajoutez vos observations sur le terrain, les conditions de travail...',
+        fieldType: 'textarea',
+        rows: 3,
+        collapsed: false,
+        photos: []
+      }
+    ], [generateReferenceNumber]);
+
+    const [sections, setSections] = useState(() => createAllSections());
     const [profilePhoto, setProfilePhoto] = useState(null);
     const [profilePhotoPreview, setProfilePhotoPreview] = useState(null);
     const [showLightbox, setShowLightbox] = useState(false);
     const [lightboxImage, setLightboxImage] = useState(null);
+    const [clients, setClients] = useState([]);
 
+    // Charger la liste des clients
     useEffect(() => {
-      if (search) {
-        // Charger les données existantes dans les sections
-        setSections(prev => prev.map(section => {
-          if (section.id === 'general_info') {
-            return {
-              ...section,
-              fields: section.fields?.map(field => {
-                if (field.id === 'nom') {
-                  return { ...field, value: search.nom || '' };
-                }
-                if (field.id === 'prenom') {
-                  return { ...field, value: search.prenom || '' };
-                }
-                if (field.id === 'adresse') {
-                  return { ...field, value: search.location || '' };
-                }
-                return field;
-              })
-            };
-          }
-          if (section.id === 'description') {
-            return { ...section, value: search.description || '' };
-          }
-          if (section.id === 'observations') {
-            return { ...section, value: search.observations || '' };
-          }
-          return section;
-        }));
-        
-        // Charger les photos existantes si disponibles
-        if (search.photos && Array.isArray(search.photos)) {
-          // A. Charger la photo de profil
-          const profilePhotoData = search.photos.find(p => p.is_profile);
-          if (profilePhotoData) {
-            const photoUrl = profilePhotoData.url || `${API}/searches/${search.id}/photos/${profilePhotoData.filename}`;
-            setProfilePhotoPreview(photoUrl);
-          }
-
-          // B. Distribuer les photos dans leurs sections respectives
-          setSections(prevSections => prevSections.map(section => {
-            // Filtrer les photos qui appartiennent à cette section
-            const sectionPhotos = search.photos
-              .filter(p => p.section_id === section.id && !p.is_profile)
-              .map(p => ({
-                url: p.url || `${API}/searches/${search.id}/photos/${p.filename}`,
-                filename: p.filename,
-                name: p.original_name || p.filename
-              }));
-
-            if (sectionPhotos.length > 0) {
-              return { ...section, photos: sectionPhotos };
+      const loadClients = async () => {
+        try {
+          const response = await axios.get(`${API}/clients`, {
+            headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+          });
+          
+          const clientList = response.data || [];
+          setClients(clientList);
+          
+          // Mettre à jour les options du champ client_id
+          setSections(prev => prev.map(section => {
+            if (section.id === 'general_info') {
+              return {
+                ...section,
+                fields: section.fields?.map(field => {
+                  if (field.id === 'client_id') {
+                    return {
+                      ...field,
+                      options: clientList.map(c => ({
+                        value: c.id,
+                        label: `${c.nom} ${c.prenom || ''}`.trim()
+                      }))
+                    };
+                  }
+                  return field;
+                })
+              };
             }
             return section;
           }));
+        } catch (error) {
+          console.error('Erreur chargement clients:', error);
+        }
+      };
+      
+      loadClients();
+    }, []);
+
+    useEffect(() => {
+      if (search) {
+        console.log('🔄 [EditSearchModal] Chargement de la recherche:', search.id, 'avec', search.photos?.length || 0, 'photos');
+        
+        // Charger les photos d'abord pour préparer la distribution
+        const photosBySection = {};
+        let profilePhotoUrl = null;
+        
+        if (search.photos && Array.isArray(search.photos)) {
+          console.log('📸 [EditSearchModal] Photos trouvées:', search.photos.length);
+          
+          // A. Trouver la photo de profil
+          const profilePhotoData = search.photos.find(p => p.is_profile);
+          if (profilePhotoData) {
+            profilePhotoUrl = profilePhotoData.url || `${API}/searches/${search.id}/photos/${profilePhotoData.filename}`;
+            console.log('🖼️ [EditSearchModal] Photo de profil:', profilePhotoUrl);
+            setProfilePhotoPreview(profilePhotoUrl);
+          }
+          
+          // B. Grouper les photos par section
+          const nonProfilePhotos = search.photos.filter(p => !p.is_profile);
+          console.log('📷 [EditSearchModal] Photos non-profil:', nonProfilePhotos.map(p => ({ section: p.section_id, filename: p.filename })));
+          
+          nonProfilePhotos.forEach(p => {
+              if (!photosBySection[p.section_id]) {
+                photosBySection[p.section_id] = [];
+              }
+              photosBySection[p.section_id].push({
+                url: p.url || `${API}/searches/${search.id}/photos/${p.filename}`,
+                filename: p.filename,
+                name: p.original_name || p.filename
+              });
+            });
+          
+          console.log('📁 [EditSearchModal] Photos par section:', Object.keys(photosBySection).map(k => `${k}: ${photosBySection[k].length}`));
+        }
+        
+        // Charger TOUTES les données en une seule fois (texte + photos)
+        setSections(prev => prev.map(section => {
+          let updatedSection = { ...section };
+          
+          // Charger les champs texte
+          if (section.id === 'general_info') {
+            updatedSection.fields = section.fields?.map(field => {
+              if (field.id === 'nom') return { ...field, value: search.nom || '' };
+              if (field.id === 'prenom') return { ...field, value: search.prenom || '' };
+              if (field.id === 'adresse') return { ...field, value: search.location || '' };
+              if (field.id === 'client_type') return { ...field, value: search.client_id ? 'recurring' : 'occasional' };
+              if (field.id === 'client_id') return { ...field, value: search.client_id || '' };
+              return field;
+            });
+          }
+          if (section.id === 'description') {
+            updatedSection.value = search.description || '';
+          }
+          if (section.id === 'observations') {
+            // Parser le JSON pour récupérer le texte observations
+            try {
+              const observationsData = JSON.parse(search.observations || '{}');
+              updatedSection.value = observationsData.text || '';
+            } catch (e) {
+              // Si ce n'est pas du JSON, c'est l'ancien format texte simple
+              updatedSection.value = search.observations || '';
+            }
+          }
+          
+          // Ajouter les photos de cette section
+          if (photosBySection[section.id]) {
+            updatedSection.photos = photosBySection[section.id];
+            console.log(`✅ [EditSearchModal] Section ${section.id}: ${photosBySection[section.id].length} photos ajoutées`);
+          }
+          
+          return updatedSection;
+        }));
+        
+        // Recréer les sections personnalisées à partir du JSON
+        try {
+          const observationsData = JSON.parse(search.observations || '{}');
+          if (observationsData.customSections && Array.isArray(observationsData.customSections)) {
+            const customSections = observationsData.customSections.map(cs => ({
+              id: cs.id,
+              type: 'custom',
+              title: cs.title,
+              icon: Plus,
+              value: cs.value,
+              required: false,
+              placeholder: 'Décrivez le contenu de cette section...',
+              fieldType: 'textarea',
+              rows: 4,
+              removable: true,
+              collapsed: false,
+              photos: photosBySection[cs.id] || []
+            }));
+            
+            if (customSections.length > 0) {
+              console.log(`✅ [EditSearchModal] ${customSections.length} sections personnalisées restaurées`);
+              // Filtrer les sections custom déjà présentes pour éviter les doublons
+              setSections(prev => {
+                const baseAndStandardSections = prev.filter(s => s.type !== 'custom');
+                return [...baseAndStandardSections, ...customSections];
+              });
+            }
+          }
+        } catch (e) {
+          console.log('⚠️ [EditSearchModal] Pas de sections personnalisées ou ancien format');
         }
       }
     }, [search]);
@@ -5171,17 +7770,36 @@ const SearchHistory = () => {
       // Construire le payload depuis les sections
       const generalSection = sections.find(s => s.id === 'general_info');
       const addressField = generalSection?.fields?.find(f => f.id === 'adresse');
+      const clientTypeField = generalSection?.fields?.find(f => f.id === 'client_type');
+      const clientIdField = generalSection?.fields?.find(f => f.id === 'client_id');
       const descriptionSection = sections.find(s => s.id === 'description');
-      const additionalContent = sections
-        .filter(s => s.value && !['general_info', 'description'].includes(s.id))
-        .map(s => `**${s.title}:**\n${s.value}`)
-        .join('\n\n');
+      // Sauvegarder les sections personnalisées comme JSON
+      const customSections = sections
+        .filter(s => s.type === 'custom')
+        .map(s => ({ id: s.id, title: s.title, value: s.value || '' }));
+      
+      const observationsSection = sections.find(s => s.id === 'observations');
+      const observationsText = observationsSection?.value || '';
+      
+      // Combiner observations texte + sections custom en JSON
+      const observationsData = {
+        text: observationsText,
+        customSections: customSections
+      };
 
       const payload = {
         location: addressField?.value || '',
         description: descriptionSection?.value || '',
-        observations: additionalContent || ''
+        observations: JSON.stringify(observationsData)
       };
+      
+      // Ajouter client_id uniquement si type = recurring et un client est sélectionné
+      if (clientTypeField?.value === 'recurring' && clientIdField?.value) {
+        payload.client_id = clientIdField.value;
+      } else {
+        // Explicitement null pour les clients occasionnels
+        payload.client_id = null;
+      }
 
       try {
         // 1. Sauvegarder d'abord les données textuelles
@@ -5255,14 +7873,22 @@ const SearchHistory = () => {
     if (!search) return null;
 
     return (
-      <Dialog open={showEditModal} onOpenChange={onClose}>
-        <DialogContent className="sm:max-w-4xl max-h-[90vh] overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle className="text-2xl font-semibold">Modifier la Recherche</DialogTitle>
-            <DialogDescription>
-              Formulaire personnalisable avec sections modulaires
-            </DialogDescription>
-          </DialogHeader>
+      <>
+      <div className="fixed inset-0 bg-black bg-opacity-90 flex items-center justify-center z-50">
+        <div className="bg-white rounded-xl shadow-2xl w-[98vw] h-[98vh] overflow-y-auto p-6">
+          {/* Header */}
+          <div className="flex items-center justify-between mb-6 pb-4 border-b-2 border-gray-200">
+            <div>
+              <h2 className="text-2xl font-semibold text-gray-900">Modifier la Recherche</h2>
+              <p className="text-sm text-gray-600 mt-1">Formulaire personnalisable avec sections modulaires</p>
+            </div>
+            <button
+              onClick={onClose}
+              className="p-2 hover:bg-gray-100 rounded-full transition-colors"
+            >
+              <X className="h-6 w-6 text-gray-600" />
+            </button>
+          </div>
           
           <form onSubmit={handleSubmit} className="space-y-6 py-4">
             {/* Rendu des sections dynamiques */}
@@ -5314,13 +7940,50 @@ const SearchHistory = () => {
                     {section.fieldType === 'multiple' && section.fields ? (
                       <div className="space-y-4">
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                          {section.fields.map((field) => (
-                            <div key={field.id} className="space-y-2">
+                          {section.fields.map((field) => {
+                            // Gérer les champs conditionnels
+                            if (field.dependsOn) {
+                              const dependentField = section.fields.find(f => f.id === field.dependsOn);
+                              if (dependentField && dependentField.value !== field.dependsOnValue) {
+                                return null; // Ne pas afficher si la condition n'est pas remplie
+                              }
+                            }
+                            
+                            return (
+                            <div key={field.id} className="space-y-2" style={field.type === 'radio' ? {gridColumn: '1 / -1'} : {}}>
                               <label className="block text-sm font-medium text-gray-700">
                                 {field.label}
                                 {field.required && <span className="text-red-500 ml-1">*</span>}
                               </label>
-                              {field.type === 'textarea' ? (
+                              {field.type === 'radio' ? (
+                                <div className="flex gap-4 p-4 bg-gray-50 rounded-xl">
+                                  {field.options?.map(option => (
+                                    <label key={option.value} className="flex items-center gap-2 cursor-pointer">
+                                      <input
+                                        type="radio"
+                                        name={field.id}
+                                        value={option.value}
+                                        checked={field.value === option.value}
+                                        onChange={(e) => handleFieldChange(section.id, field.id, e.target.value)}
+                                        className="w-4 h-4 text-gray-900"
+                                      />
+                                      <span className="text-sm">{option.label}</span>
+                                    </label>
+                                  ))}
+                                </div>
+                              ) : field.type === 'select' ? (
+                                <select
+                                  value={field.value}
+                                  onChange={(e) => handleFieldChange(section.id, field.id, e.target.value)}
+                                  className="w-full rounded-xl border border-gray-200 focus:border-gray-900 focus:ring-2 focus:ring-gray-900/10 transition-colors duration-200 text-base p-4"
+                                  required={field.required}
+                                >
+                                  <option value="">-- Sélectionner un client --</option>
+                                  {field.options?.map(option => (
+                                    <option key={option.value} value={option.value}>{option.label}</option>
+                                  ))}
+                                </select>
+                              ) : field.type === 'textarea' ? (
                                 <textarea
                                   value={field.value}
                                   onChange={(e) => handleFieldChange(section.id, field.id, e.target.value)}
@@ -5342,7 +8005,8 @@ const SearchHistory = () => {
                                 />
                               )}
                             </div>
-                          ))}
+                            );
+                          })}
                         </div>
                         
                         {/* Photo de profil pour general_info */}
@@ -5574,23 +8238,26 @@ const SearchHistory = () => {
               </div>
             </div>
           </form>
-        </DialogContent>
+        </div>
+      </div>
 
-        {/* Lightbox Modal pour visualiser les photos en grand */}
-        {showLightbox && (
+      {/* Lightbox Modal pour visualiser les photos en grand - Rendu via Portal pour éviter les conflits avec Dialog */}
+      {showLightbox && ReactDOM.createPortal(
           <div 
-            className="fixed inset-0 bg-black/90 z-[9999] flex items-center justify-center p-4"
+            className="fixed inset-0 bg-black/90 flex items-center justify-center p-4"
+            style={{ zIndex: 99999 }}
             onClick={() => {
               setShowLightbox(false);
               setLightboxImage(null);
             }}
           >
             <button
-              onClick={() => {
+              onClick={(e) => {
+                e.stopPropagation();
                 setShowLightbox(false);
                 setLightboxImage(null);
               }}
-              className="absolute top-4 right-4 bg-white/10 hover:bg-white/20 text-white rounded-full w-12 h-12 flex items-center justify-center backdrop-blur-sm transition-all z-[10000]"
+              className="absolute top-4 right-4 bg-white/10 hover:bg-white/20 text-white rounded-full w-12 h-12 flex items-center justify-center backdrop-blur-sm transition-all"
             >
               <X className="h-6 w-6" />
             </button>
@@ -5609,9 +8276,10 @@ const SearchHistory = () => {
             <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-white/10 backdrop-blur-sm text-white px-4 py-2 rounded-full text-sm">
               Cliquez n'importe où pour fermer
             </div>
-          </div>
-        )}
-      </Dialog>
+          </div>,
+          document.body
+      )}
+      </>
     );
   };
 
@@ -5623,14 +8291,14 @@ const SearchHistory = () => {
         setPdfUrl('');
       }
     }}>
-      <DialogContent className="sm:max-w-4xl h-[80vh]">
+      <DialogContent className="max-w-[95vw] w-[95vw] h-[95vh] p-6">
         <DialogHeader>
           <DialogTitle>Aperçu du Rapport PDF</DialogTitle>
           <DialogDescription>
             Prévisualisez le rapport avant téléchargement
           </DialogDescription>
         </DialogHeader>
-        <div className="flex-1 min-h-0">
+        <div className="flex-1 min-h-0 h-[calc(95vh-180px)]">
           {pdfUrl && (
             <iframe
               src={pdfUrl}
@@ -5756,80 +8424,92 @@ const SearchHistory = () => {
           </div>
         </div>
       ) : (
-        <div className="grid gap-6">
+        <div className="grid gap-8">
           {filteredSearches.map((search) => (
-            <div key={search.id} className={`rounded-2xl border shadow-sm hover:shadow-xl transition-all duration-300 group overflow-hidden ${getStatusBackgroundColor(search.status)}`}>
+            <div key={search.id} className={`rounded-2xl border-2 shadow-md hover:shadow-xl transition-all duration-300 group overflow-hidden backdrop-blur-sm transform hover:-translate-y-0.5 ${getStatusBackgroundColor(search.status)}`}>
               <div className="p-6">
                 {/* Header avec location et statut */}
-                <div className="flex items-start justify-between mb-4">
+                <div className="flex items-start justify-between mb-5">
                   <div className="flex-1">
-                    <div className="flex items-center space-x-3 mb-2">
-                      <h3 className="text-xl font-bold text-gray-900">{search.location}</h3>
-                      <span className={`text-xs px-3 py-1.5 rounded-full font-semibold uppercase tracking-wide ${getStatusColor(search.status)}`}>
+                    <div className="flex items-center space-x-3 mb-2 flex-wrap gap-2">
+                      <div className="flex items-center space-x-2">
+                        <MapPin className="h-5 w-5 text-blue-600 flex-shrink-0" />
+                        <h3 className="text-xl font-bold text-gray-900 tracking-tight">{formatFullAddress(search)}</h3>
+                      </div>
+                      <span className={`text-xs px-3 py-1.5 rounded-full font-bold uppercase tracking-wider shadow-sm ${getStatusColor(search.status)}`}>
                         {search.status}
                       </span>
+                      {(search.status === 'SHARED' || search.status === 'SHARED_TO_BUREAU') && (
+                        <span className="inline-flex items-center px-3 py-1.5 rounded-full text-xs font-bold bg-gradient-to-r from-green-100 to-emerald-100 text-green-800 border-2 border-green-400 shadow-md">
+                          <Share2 className="h-3.5 w-3.5 mr-1.5" strokeWidth={2.5} />
+                          ✅ Déjà partagé au bureau
+                        </span>
+                      )}
                     </div>
-                    <p className="text-gray-600 leading-relaxed">{search.description}</p>
+                    
+                    {/* Informations client */}
+                    {(search.nom || search.prenom) && (
+                      <div className="flex items-center space-x-2 mb-2 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-lg px-3 py-2 border border-blue-100">
+                        <User className="h-4 w-4 text-blue-600" />
+                        <p className="text-sm font-semibold text-gray-800">
+                          {search.prenom} {search.nom}
+                        </p>
+                      </div>
+                    )}
+                    
+                    <p className="text-gray-700 leading-relaxed text-base">{search.description}</p>
                   </div>
                 </div>
                 
-                {/* Photos - Design amélioré */}
+                {/* Photos - Toutes en horizontal */}
                 {search.photos && search.photos.length > 0 && (
-                  <div className="mb-4">
+                  <div className="mb-5">
                     <div className="flex items-center justify-between mb-3">
-                      <p className="text-sm font-semibold text-gray-900 flex items-center">
-                        <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <p className="text-sm font-bold text-gray-900 flex items-center">
+                        <svg className="w-4 h-4 mr-2 text-indigo-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
                         </svg>
                         {search.photos.length} {search.photos.length > 1 ? 'Photos' : 'Photo'}
                       </p>
                     </div>
-                    <div className="flex space-x-3 overflow-x-auto pb-2">
-                      {search.photos.slice(0, 3).map((photo, index) => (
+                    <div className="flex space-x-3 overflow-x-auto pb-2 scrollbar-hide">
+                      {search.photos.map((photo, index) => (
                         <div key={photo.filename || `${search.id}-photo-${index}`} className="relative flex-shrink-0 group/photo">
                           <img
                             src={`${API}/searches/${search.id}/photos/${photo.filename}`}
-                            alt={`Photo ${photo.number}`}
-                            className="w-24 h-24 object-cover rounded-xl border-2 border-white shadow-md hover:scale-105 transition-transform duration-200 cursor-pointer"
+                            alt={`Photo ${index + 1}/${search.photos.length}`}
+                            className="w-24 h-24 object-cover rounded-xl border-2 border-white shadow-lg hover:scale-105 hover:rotate-1 transition-all duration-200 cursor-pointer ring-1 ring-gray-100"
                             onError={(e) => {
                               e.target.style.display = 'none';
                             }}
                           />
-                          <div className="absolute top-1 right-1 w-6 h-6 bg-gradient-to-br from-gray-800 to-gray-900 text-white rounded-full flex items-center justify-center text-xs font-bold shadow-lg">
-                            {photo.number}
+                          <div className="absolute top-1 right-1 px-1.5 h-5 bg-gradient-to-br from-indigo-600 to-purple-600 text-white rounded-full flex items-center justify-center text-[10px] font-bold shadow-md">
+                            {index + 1}/{search.photos.length}
                           </div>
                         </div>
                       ))}
-                      {search.photos.length > 3 && (
-                        <div className="flex-shrink-0 w-24 h-24 bg-gradient-to-br from-gray-100 to-gray-200 rounded-xl border-2 border-white shadow-md flex items-center justify-center">
-                          <div className="text-center">
-                            <p className="text-2xl font-bold text-gray-700">+{search.photos.length - 3}</p>
-                            <p className="text-xs text-gray-500">plus</p>
-                          </div>
-                        </div>
-                      )}
                     </div>
                   </div>
                 )}
                 
                 {/* Observations */}
-                {search.observations && (
-                  <div className="bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl p-4 mb-4 border border-blue-100">
-                    <p className="text-sm text-blue-900">
-                      <span className="font-semibold">💬 Observations:</span> {search.observations}
+                {search.observations && cleanObservations(search.observations) && (
+                  <div className="bg-gradient-to-r from-blue-50 via-indigo-50 to-purple-50 rounded-xl p-4 mb-5 border border-blue-200 shadow-sm">
+                    <p className="text-sm text-blue-900 leading-relaxed">
+                      <span className="font-bold text-indigo-700">💬 Observations:</span> {cleanObservations(search.observations)}
                     </p>
                   </div>
                 )}
                     
                     {/* Métadonnées */}
-                    <div className="flex items-center space-x-6 text-sm text-gray-600 mb-4 pb-4 border-b border-gray-200">
-                      <span className="flex items-center font-medium">
-                        <Calendar className="h-4 w-4 mr-2 text-gray-400" />
+                    <div className="flex items-center space-x-4 text-sm mb-5 pb-4 border-b border-gray-200">
+                      <span className="flex items-center font-semibold text-gray-700 bg-gray-50 px-3 py-2 rounded-lg">
+                        <Calendar className="h-4 w-4 mr-2 text-indigo-600" strokeWidth={2} />
                         {formatDate(search.created_at)}
                       </span>
                       {search.latitude && search.longitude && (
-                        <span className="flex items-center font-medium">
-                          <MapPin className="h-4 w-4 mr-2 text-gray-400" />
+                        <span className="flex items-center font-semibold text-gray-700 bg-gray-50 px-3 py-2 rounded-lg">
+                          <MapPin className="h-4 w-4 mr-2 text-red-600" strokeWidth={2} />
                           {search.latitude.toFixed(4)}, {search.longitude.toFixed(4)}
                         </span>
                       )}
@@ -5838,52 +8518,70 @@ const SearchHistory = () => {
                     {/* Action Buttons - Toujours visibles sur mobile */}
                     <div className="flex flex-wrap gap-3 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity duration-300">
                       <button
-                        onClick={() => {
-                          setEditingSearch(search);
-                          setShowEditModal(true);
+                        onClick={async () => {
+                          // Charger la recherche complète avec les photos et ouvrir en mode édition plein écran
+                          try {
+                            console.log('🔄 Chargement de la recherche complète avec photos...');
+                            const response = await axios.get(`${API}/searches/${search.id}`, {
+                              headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+                            });
+                            console.log('✅ Recherche chargée avec photos:', response.data);
+                            if (onEditSearch) {
+                              onEditSearch(response.data);
+                            }
+                          } catch (error) {
+                            console.error('❌ Erreur chargement recherche:', error);
+                            // Fallback: utiliser les données déjà disponibles
+                            if (onEditSearch) {
+                              onEditSearch(search);
+                            }
+                          }
                         }}
-                        className="inline-flex items-center px-4 py-2.5 text-sm font-semibold text-white bg-gradient-to-r from-gray-800 to-gray-900 rounded-xl hover:from-gray-900 hover:to-black shadow-md hover:shadow-lg transition-all duration-200 transform hover:-translate-y-0.5"
+                        className="inline-flex items-center px-4 py-2 text-sm font-bold text-white bg-gradient-to-r from-indigo-600 to-purple-600 rounded-xl hover:from-indigo-700 hover:to-purple-700 shadow-lg hover:shadow-xl transition-all duration-200 transform hover:scale-105"
                       >
-                        <Edit className="h-4 w-4 mr-2" />
+                        <Edit className="h-4 w-4 mr-2" strokeWidth={2} />
                         Modifier
                       </button>
                       
                       <button
                         onClick={() => generatePDFPreview(search.id)}
                         disabled={generating}
-                        className="inline-flex items-center px-4 py-2.5 text-sm font-semibold text-gray-700 bg-white border-2 border-gray-200 rounded-xl hover:border-gray-300 hover:bg-gray-50 shadow-sm hover:shadow-md transition-all duration-200 transform hover:-translate-y-0.5"
+                        className="inline-flex items-center px-4 py-2 text-sm font-bold text-gray-700 bg-white border-2 border-gray-300 rounded-xl hover:border-indigo-400 hover:bg-gradient-to-r hover:from-gray-50 hover:to-indigo-50 shadow-md hover:shadow-lg transition-all duration-200 transform hover:scale-105"
                       >
-                        <Eye className="h-4 w-4 mr-2" />
+                        <Eye className="h-4 w-4 mr-2" strokeWidth={2} />
                         Aperçu PDF
                       </button>
                       
-                      <button
-                        onClick={() => updateSearchStatus(search.id, 'SHARED')}
-                        className="inline-flex items-center px-4 py-2.5 text-sm font-semibold text-blue-700 bg-gradient-to-r from-blue-50 to-blue-100 border-2 border-blue-200 rounded-xl hover:from-blue-100 hover:to-blue-200 shadow-sm hover:shadow-md transition-all duration-200 transform hover:-translate-y-0.5"
-                      >
-                        <Share2 className="h-4 w-4 mr-2" />
-                        Partager
-                      </button>
+                      {/* Bouton Partager - masqué si déjà partagé */}
+                      {search.status !== 'SHARED' && search.status !== 'SHARED_TO_BUREAU' && (
+                        <button
+                          onClick={() => updateSearchStatus(search.id, 'SHARED')}
+                          className="inline-flex items-center px-4 py-2 text-sm font-bold text-blue-700 bg-gradient-to-r from-blue-100 to-cyan-100 border-2 border-blue-300 rounded-xl hover:from-blue-200 hover:to-cyan-200 hover:border-blue-400 shadow-md hover:shadow-lg transition-all duration-200 transform hover:scale-105"
+                        >
+                          <Share2 className="h-4 w-4 mr-2" strokeWidth={2} />
+                          Partager
+                        </button>
+                      )}
 
                       <button
                         onClick={() => downloadPDF(search.id)}
                         disabled={generating}
-                        className="inline-flex items-center px-4 py-2.5 text-sm font-semibold text-white bg-gradient-to-r from-gray-800 to-black rounded-xl hover:from-black hover:to-gray-900 shadow-md hover:shadow-lg transition-all duration-200 transform hover:-translate-y-0.5"
+                        className="inline-flex items-center px-4 py-2 text-sm font-bold text-white bg-gradient-to-r from-gray-800 to-gray-900 rounded-xl hover:from-black hover:to-gray-800 shadow-lg hover:shadow-xl transition-all duration-200 transform hover:scale-105"
                       >
                         {generating ? (
                           <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
                         ) : (
-                          <Download className="h-4 w-4 mr-2" />
+                          <Download className="h-4 w-4 mr-2" strokeWidth={2} />
                         )}
                         Télécharger PDF
                       </button>
 
                       <button
                         onClick={() => deleteSearch(search)}
-                        className="inline-flex items-center px-4 py-2.5 text-sm font-semibold text-red-700 bg-gradient-to-r from-red-50 to-red-100 border-2 border-red-200 rounded-xl hover:from-red-100 hover:to-red-200 shadow-sm hover:shadow-md transition-all duration-200 transform hover:-translate-y-0.5"
+                        className="inline-flex items-center px-4 py-2 text-sm font-bold text-red-700 bg-gradient-to-r from-red-100 to-pink-100 border-2 border-red-300 rounded-xl hover:from-red-200 hover:to-pink-200 hover:border-red-400 shadow-md hover:shadow-lg transition-all duration-200 transform hover:scale-105"
                       >
-                        <svg className="h-4 w-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        <svg className="h-4 w-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
+                          <path strokeLinecap="round" strokeLinejoin="round" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
                         </svg>
                         Supprimer
                       </button>
@@ -5915,12 +8613,10 @@ const ShareSearch = () => {
   const [searches, setSearches] = useState([]);
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [refreshTrigger, setRefreshTrigger] = useState(0);
 
-  useEffect(() => {
-    loadSearches();
-  }, []);
-
-  const loadSearches = async () => {
+  const loadSearches = useCallback(async () => {
+    console.log('🔄 Chargement des recherches... (trigger:', refreshTrigger, ')');
     setLoading(true);
     try {
       const response = await axios.get(`${API}/searches`, {
@@ -5928,13 +8624,39 @@ const ShareSearch = () => {
           'Authorization': `Bearer ${localStorage.getItem('token')}`
         }
       });
-      setSearches(response.data);
+      // Utiliser response.data.data car l'API retourne { data: [...], count: X }
+      const searchesData = response.data.data || response.data || [];
+      setSearches(searchesData);
+      console.log('✅ Recherches chargées:', searchesData.length, 'total dont', searchesData.filter(s => s.status === 'DRAFT').length, 'brouillons,', searchesData.filter(s => s.status === 'ACTIVE').length, 'actives');
     } catch (error) {
-      console.error('Erreur chargement recherches:', error);
+      console.error('❌ Erreur chargement recherches:', error);
     } finally {
       setLoading(false);
     }
-  };
+  }, [refreshTrigger]);
+
+  useEffect(() => {
+    loadSearches();
+  }, [loadSearches]);
+
+  // Écouter l'événement de finalisation pour recharger automatiquement
+  useEffect(() => {
+    const handleSearchFinalized = (event) => {
+      console.log('🔔 Événement searchFinalized reçu!', event.detail);
+      setRefreshTrigger(prev => {
+        const newValue = prev + 1;
+        console.log('📈 RefreshTrigger incrémenté:', prev, '→', newValue);
+        return newValue;
+      });
+    };
+    
+    console.log('👂 Écouteur searchFinalized activé');
+    window.addEventListener('searchFinalized', handleSearchFinalized);
+    return () => {
+      console.log('👋 Écouteur searchFinalized désactivé');
+      window.removeEventListener('searchFinalized', handleSearchFinalized);
+    };
+  }, []);
 
   const handleSearchToggle = (searchId) => {
     setSelectedSearches(prev => 
@@ -5982,13 +8704,11 @@ const ShareSearch = () => {
       if (searchId) {
         // Generate PDF for single search
         const response = await axios({
-          method: 'post',
-          url: `${API}/reports/generate-pdf/${searchId}`,
-          data: new FormData(),
+          method: 'get',
+          url: `${API}/searches/${searchId}/pdf`,
           responseType: 'blob',
           headers: {
-            'Authorization': `Bearer ${localStorage.getItem('token')}`,
-            'Content-Type': 'multipart/form-data'
+            'Authorization': `Bearer ${localStorage.getItem('token')}`
           }
         });
 
@@ -6077,12 +8797,12 @@ const ShareSearch = () => {
       <div className="bg-white rounded-2xl border border-gray-200 shadow-sm p-8">
         <div className="flex items-center justify-between mb-6">
           <div>
-            <h2 className="text-2xl font-semibold text-gray-900">Partager avec le Bureau</h2>
-            <p className="text-gray-600 mt-1">Générez et partagez vos rapports PDF</p>
+            <h2 className="text-2xl font-semibold text-gray-900">Mes Recherches</h2>
+            <p className="text-gray-600 mt-1">Consultez et partagez vos recherches finalisées</p>
           </div>
           <div className="flex items-center space-x-3">
             <span className="text-sm font-medium text-gray-500">
-              {searches.length} recherche(s)
+              {searches.filter(s => s.status !== 'DRAFT').length} recherche(s) finalisée(s)
             </span>
           </div>
         </div>
@@ -6137,18 +8857,27 @@ const ShareSearch = () => {
       </div>
 
       {/* Searches List */}
-      {searches.length === 0 ? (
-        <div className="bg-white rounded-2xl border border-gray-200 shadow-sm">
-          <div className="p-12 text-center">
-            <Share2 className="h-16 w-16 mx-auto mb-4 text-gray-300" />
-            <h3 className="text-xl font-semibold text-gray-900 mb-2">Aucune recherche disponible</h3>
-            <p className="text-gray-500">Créez d'abord des recherches pour les partager avec le bureau.</p>
+      {(() => {
+        // Filtrer pour exclure les brouillons (DRAFT) - uniquement les recherches finalisées
+        const finalizedSearches = searches.filter(s => s.status !== 'DRAFT');
+        
+        return finalizedSearches.length === 0 ? (
+          <div className="bg-white rounded-2xl border border-gray-200 shadow-sm">
+            <div className="p-12 text-center">
+              <Share2 className="h-16 w-16 mx-auto mb-4 text-gray-300" />
+              <h3 className="text-xl font-semibold text-gray-900 mb-2">Aucune recherche finalisée</h3>
+              <p className="text-gray-500">Les recherches finalisées apparaîtront ici. Les brouillons sont disponibles dans "Brouillons en attente".</p>
+            </div>
           </div>
-        </div>
-      ) : (
-        <div className="grid gap-4">
-          {searches.map((search) => (
-            <div key={search.id} className="bg-white rounded-2xl border border-gray-200 shadow-sm hover:shadow-md transition-all duration-200">
+        ) : (
+          <div className="grid gap-4">
+            {finalizedSearches.map((search) => {
+              const isShared = search.status === 'SHARED' || search.status === 'SHARED_TO_BUREAU';
+              
+              return (
+            <div key={search.id} className={`rounded-2xl border-2 shadow-sm hover:shadow-md transition-all duration-200 ${
+              isShared ? 'bg-green-50 border-green-300' : 'bg-white border-gray-200'
+            }`}>
               <div className="p-6">
                 <div className="flex items-start justify-between">
                   <div className="flex items-start space-x-4 flex-1">
@@ -6158,19 +8887,28 @@ const ShareSearch = () => {
                         type="checkbox"
                         checked={selectedSearches.includes(search.id)}
                         onChange={() => handleSearchToggle(search.id)}
-                        className="w-5 h-5 text-gray-900 bg-white border-2 border-gray-300 rounded focus:ring-gray-900 focus:ring-2 transition-all duration-200"
+                        disabled={isShared}
+                        className="w-5 h-5 text-gray-900 bg-white border-2 border-gray-300 rounded focus:ring-gray-900 focus:ring-2 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
                       />
                     </div>
                     
                     {/* Search Content */}
                     <div className="flex-1">
-                      <h3 className="text-lg font-semibold text-gray-900 mb-1">{search.location}</h3>
+                      <div className="flex items-center gap-3 mb-2">
+                        <h3 className="text-lg font-semibold text-gray-900">{formatFullAddress(search)}</h3>
+                        {isShared && (
+                          <span className="inline-flex items-center px-3 py-1 rounded-full text-xs font-bold bg-gradient-to-r from-green-100 to-emerald-100 text-green-800 border-2 border-green-400 shadow-sm">
+                            <Share2 className="h-3 w-3 mr-1.5" strokeWidth={2.5} />
+                            ✅ Déjà partagé
+                          </span>
+                        )}
+                      </div>
                       <p className="text-gray-600 mb-3 line-clamp-2">{search.description}</p>
                       
-                      {search.observations && (
+                      {search.observations && cleanObservations(search.observations) && (
                         <div className="bg-blue-50 rounded-xl p-3 mb-3">
                           <p className="text-sm text-blue-800">
-                            <strong>Observations:</strong> {search.observations}
+                            <strong>Observations:</strong> {cleanObservations(search.observations)}
                           </p>
                         </div>
                       )}
@@ -6209,15 +8947,20 @@ const ShareSearch = () => {
                     
                     <button
                       onClick={() => generateAndShareToBureau(search.id)}
-                      disabled={generating}
-                      className="inline-flex items-center px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors duration-200"
+                      disabled={generating || isShared}
+                      className={`inline-flex items-center px-4 py-2 text-sm font-medium rounded-lg transition-colors duration-200 ${
+                        isShared
+                          ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                          : 'text-white bg-blue-600 hover:bg-blue-700'
+                      }`}
+                      title={isShared ? 'Déjà partagé au bureau' : 'Partager au bureau'}
                     >
                       {generating ? (
                         <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
                       ) : (
                         <>
                           <Share2 className="h-4 w-4 mr-2" />
-                          Bureau
+                          {isShared ? 'Partagé' : 'Bureau'}
                         </>
                       )}
                     </button>
@@ -6225,9 +8968,11 @@ const ShareSearch = () => {
                 </div>
               </div>
             </div>
-          ))}
+          );
+        })}
         </div>
-      )}
+        );
+      })()}
     </div>
   );
 };
@@ -6516,8 +9261,8 @@ const ReportsView = () => {
     
     try {
       const response = await axios({
-        method: 'post',
-        url: `${API}/reports/generate-pdf/${searchId}`,
+        method: 'get',
+        url: `${API}/searches/${searchId}/pdf`,
         responseType: 'blob',
         headers: {
           'Authorization': `Bearer ${localStorage.getItem('token')}`
@@ -6869,17 +9614,17 @@ const ReportsView = () => {
                   
                   <div className="flex-1">
                     <div className="flex items-center space-x-3 mb-2">
-                      <h3 className="text-lg font-semibold text-gray-900">{search.location}</h3>
+                      <h3 className="text-lg font-semibold text-gray-900">{formatFullAddress(search)}</h3>
                       <Badge className={`text-xs px-2 py-1 rounded-full ${getStatusColor(search.status)}`}>
                         {search.status}
                       </Badge>
                     </div>
                     <p className="text-gray-600 mb-3 line-clamp-2">{search.description}</p>
                     
-                    {search.observations && (
+                    {search.observations && cleanObservations(search.observations) && (
                       <div className="bg-blue-50 rounded-xl p-3 mb-3">
                         <p className="text-sm text-blue-800">
-                          <strong>Observations:</strong> {search.observations}
+                          <strong>Observations:</strong> {cleanObservations(search.observations)}
                         </p>
                       </div>
                     )}
@@ -7111,21 +9856,548 @@ const ReportsView = () => {
   );
 };
 
+// Worksites Management Component - Standalone
+const WorksitesManagement = () => {
+  const [clients, setClients] = useState([]);
+  const [worksites, setWorksites] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [showWorksiteForm, setShowWorksiteForm] = useState(false);
+  const [editingWorksite, setEditingWorksite] = useState(null);
+  const [worksiteFilterTab, setWorksiteFilterTab] = useState('ALL');
+  const [worksiteFormData, setWorksiteFormData] = useState({
+    title: '',
+    description: '',
+    address: '',
+    client_id: '',
+    status: 'PLANNED',
+    progress: 0,
+    start_date: '',
+    end_date: '',
+    budget: '',
+    team_size: 1,
+    notes: ''
+  });
+
+  useEffect(() => {
+    loadClients();
+    loadWorksites();
+  }, []);
+
+  const loadClients = async () => {
+    try {
+      const response = await axios.get(`${API}/clients`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      setClients(response.data);
+    } catch (error) {
+      console.error('Erreur chargement clients:', error);
+    }
+  };
+
+  const loadWorksites = async () => {
+    try {
+      const response = await axios.get(`${API}/worksites`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      setWorksites(response.data);
+    } catch (error) {
+      console.error('Erreur chargement chantiers:', error);
+      setWorksites([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const saveWorksite = async (e) => {
+    e.preventDefault();
+    try {
+      if (editingWorksite) {
+        await axios.put(`${API}/worksites/${editingWorksite.id}`, worksiteFormData, {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        });
+        alert('Chantier modifié avec succès !');
+      } else {
+        await axios.post(`${API}/worksites`, worksiteFormData, {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        });
+        alert('Chantier créé avec succès !');
+      }
+
+      setWorksiteFormData({
+        title: '',
+        description: '',
+        address: '',
+        client_id: '',
+        status: 'PLANNED',
+        progress: 0,
+        start_date: '',
+        end_date: '',
+        budget: '',
+        team_size: 1,
+        notes: ''
+      });
+      setShowWorksiteForm(false);
+      setEditingWorksite(null);
+      loadWorksites();
+    } catch (error) {
+      console.error('Erreur sauvegarde chantier:', error);
+      alert('Erreur lors de la sauvegarde du chantier');
+    }
+  };
+
+  const deleteWorksite = async (worksiteId) => {
+    if (!window.confirm('Êtes-vous sûr de vouloir supprimer ce chantier ? Cette action est irréversible.')) {
+      return;
+    }
+
+    try {
+      await axios.delete(`${API}/worksites/${worksiteId}`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      alert('Chantier supprimé avec succès');
+      loadWorksites();
+    } catch (error) {
+      console.error('Erreur suppression chantier:', error);
+      alert('Erreur lors de la suppression du chantier');
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-gray-900"></div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Header avec statistiques */}
+      <div className="bg-gradient-to-r from-gray-900 to-gray-800 rounded-3xl p-8 text-white shadow-2xl">
+        <h2 className="text-3xl font-bold mb-2">Gestion des Chantiers</h2>
+        <p className="text-gray-300">Pilotez tous vos chantiers depuis une interface unique</p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="bg-white rounded-2xl p-6 shadow-md">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs text-gray-500 uppercase mb-1">Total Chantiers</p>
+              <p className="text-3xl font-bold text-black">{worksites.length}</p>
+            </div>
+            <Building className="h-10 w-10 text-gray-400" />
+          </div>
+        </div>
+        <div className="bg-white rounded-2xl p-6 shadow-md">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs text-gray-500 uppercase mb-1">En Cours</p>
+              <p className="text-3xl font-bold text-black">{worksites.filter(w => w.status === 'IN_PROGRESS').length}</p>
+            </div>
+            <Clock className="h-10 w-10 text-gray-400" />
+          </div>
+        </div>
+        <div className="bg-white rounded-2xl p-6 shadow-md">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs text-gray-500 uppercase mb-1">Terminés</p>
+              <p className="text-3xl font-bold text-black">{worksites.filter(w => w.status === 'COMPLETED').length}</p>
+            </div>
+            <CheckCircle className="h-10 w-10 text-gray-400" />
+          </div>
+        </div>
+      </div>
+
+      {/* Onglets de filtrage par statut */}
+      <div className="flex flex-wrap gap-2 p-1.5 bg-gray-100 rounded-2xl">
+        {[
+          { key: 'ALL', label: 'Tous', icon: '📋', count: worksites.length },
+          { key: 'PLANNED', label: 'Planifiés', icon: '📅', count: worksites.filter(w => w.status === 'PLANNED').length },
+          { key: 'IN_PROGRESS', label: 'En cours', icon: '🔧', count: worksites.filter(w => w.status === 'IN_PROGRESS').length },
+          { key: 'COMPLETED', label: 'Terminés', icon: '✅', count: worksites.filter(w => w.status === 'COMPLETED').length },
+        ].map(tab => (
+          <button
+            key={tab.key}
+            onClick={() => setWorksiteFilterTab(tab.key)}
+            className={`flex-1 min-w-[100px] px-4 py-3 rounded-xl text-sm font-semibold transition-all duration-200 ${
+              worksiteFilterTab === tab.key
+                ? 'bg-white text-gray-900 shadow-lg'
+                : 'text-gray-500 hover:text-gray-700 hover:bg-white/50'
+            }`}
+          >
+            <span className="mr-1">{tab.icon}</span> {tab.label}
+            <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-bold ${
+              worksiteFilterTab === tab.key
+                ? 'bg-black text-white'
+                : 'bg-gray-200 text-gray-500'
+            }`}>{tab.count}</span>
+          </button>
+        ))}
+      </div>
+
+      {/* Bouton Nouveau Chantier */}
+      <div className="flex justify-between items-center">
+        <h3 className="text-2xl font-bold text-gray-900">Liste des Chantiers</h3>
+        <Button
+          onClick={() => {
+            setShowWorksiteForm(true);
+            setEditingWorksite(null);
+            setWorksiteFormData({
+              title: '',
+              description: '',
+              address: '',
+              client_id: '',
+              status: 'PLANNED',
+              progress: 0,
+              start_date: '',
+              end_date: '',
+              budget: '',
+              team_size: 1,
+              notes: ''
+            });
+          }}
+          className="bg-black hover:bg-gray-800 text-white rounded-xl px-6 py-3 shadow-lg"
+        >
+          <Plus className="h-5 w-5 mr-2" />
+          Nouveau Chantier
+        </Button>
+      </div>
+
+      {/* Formulaire de création/modification */}
+      {showWorksiteForm && (
+        <Card className="bg-white rounded-3xl border-2 border-gray-200 shadow-2xl">
+          <CardHeader className="border-b border-gray-100">
+            <div className="flex items-center justify-between">
+              <CardTitle className="text-2xl font-bold text-gray-900">
+                {editingWorksite ? 'Modifier le chantier' : 'Créer un nouveau chantier'}
+              </CardTitle>
+              <Button
+                onClick={() => {
+                  setShowWorksiteForm(false);
+                  setEditingWorksite(null);
+                }}
+                variant="ghost"
+                size="sm"
+              >
+                <X className="h-5 w-5" />
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent className="p-8">
+            <form onSubmit={saveWorksite} className="space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">Titre du chantier *</label>
+                  <input
+                    type="text"
+                    required
+                    value={worksiteFormData.title}
+                    onChange={(e) => setWorksiteFormData({...worksiteFormData, title: e.target.value})}
+                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-black focus:outline-none"
+                    placeholder="Ex: Rénovation immeuble..."
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">Client</label>
+                  <select
+                    value={worksiteFormData.client_id}
+                    onChange={(e) => setWorksiteFormData({...worksiteFormData, client_id: e.target.value})}
+                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-black focus:outline-none"
+                  >
+                    <option value="">Sélectionner un client</option>
+                    {clients.map(client => (
+                      <option key={client.id} value={client.id}>{client.nom}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">Description</label>
+                <textarea
+                  value={worksiteFormData.description}
+                  onChange={(e) => setWorksiteFormData({...worksiteFormData, description: e.target.value})}
+                  rows="4"
+                  className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-black focus:outline-none"
+                  placeholder="Description détaillée du chantier..."
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">Adresse</label>
+                <input
+                  type="text"
+                  value={worksiteFormData.address}
+                  onChange={(e) => setWorksiteFormData({...worksiteFormData, address: e.target.value})}
+                  className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-black focus:outline-none"
+                  placeholder="Adresse complète du chantier"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">Statut</label>
+                  <select
+                    value={worksiteFormData.status}
+                    onChange={(e) => setWorksiteFormData({...worksiteFormData, status: e.target.value})}
+                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-black focus:outline-none"
+                  >
+                    <option value="PLANNED">📋 Planifié</option>
+                    <option value="IN_PROGRESS">🔧 En cours</option>
+                    <option value="ON_HOLD">⏸️ En pause</option>
+                    <option value="COMPLETED">✅ Terminé</option>
+                    <option value="CANCELLED">❌ Annulé</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">Avancement (%)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    value={worksiteFormData.progress}
+                    readOnly
+                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl bg-gray-100 cursor-not-allowed"
+                    title="L'avancement est calculé automatiquement en fonction des jours de planning"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">📊 Calculé automatiquement à partir des jours de planning</p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">Date de début</label>
+                  <input
+                    type="date"
+                    value={worksiteFormData.start_date}
+                    onChange={(e) => setWorksiteFormData({...worksiteFormData, start_date: e.target.value})}
+                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-black focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">Date de fin prévue</label>
+                  <input
+                    type="date"
+                    value={worksiteFormData.end_date}
+                    onChange={(e) => setWorksiteFormData({...worksiteFormData, end_date: e.target.value})}
+                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-black focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">Budget (€)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={worksiteFormData.budget}
+                    onChange={(e) => setWorksiteFormData({...worksiteFormData, budget: e.target.value})}
+                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-black focus:outline-none"
+                    placeholder="0.00"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">Taille de l'équipe</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={worksiteFormData.team_size}
+                    onChange={(e) => setWorksiteFormData({...worksiteFormData, team_size: parseInt(e.target.value) || 1})}
+                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-black focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">Notes internes</label>
+                <textarea
+                  value={worksiteFormData.notes}
+                  onChange={(e) => setWorksiteFormData({...worksiteFormData, notes: e.target.value})}
+                  rows="3"
+                  className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-black focus:outline-none"
+                  placeholder="Notes pour l'équipe..."
+                />
+              </div>
+
+              <div className="flex gap-4 pt-4">
+                <Button
+                  type="submit"
+                  className="flex-1 bg-black hover:bg-gray-800 text-white rounded-xl py-4 text-lg font-semibold shadow-lg"
+                >
+                  <Check className="h-5 w-5 mr-2" />
+                  {editingWorksite ? 'Enregistrer les modifications' : 'Créer le chantier'}
+                </Button>
+                <Button
+                  type="button"
+                  onClick={() => {
+                    setShowWorksiteForm(false);
+                    setEditingWorksite(null);
+                  }}
+                  variant="outline"
+                  className="rounded-xl px-8 border-2 border-gray-300"
+                >
+                  Annuler
+                </Button>
+              </div>
+            </form>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Liste des chantiers */}
+      {worksites.length === 0 ? (
+        <Card className="bg-white rounded-3xl shadow-xl">
+          <CardContent className="p-16 text-center">
+            <Building className="h-20 w-20 mx-auto mb-4 text-gray-300" />
+            <h3 className="text-2xl font-bold text-gray-900 mb-2">Aucun chantier</h3>
+            <p className="text-gray-500 mb-6">Créez votre premier chantier pour commencer</p>
+            <Button
+              onClick={() => setShowWorksiteForm(true)}
+              className="bg-black hover:bg-gray-800 text-white rounded-xl px-6 py-3"
+            >
+              <Plus className="h-5 w-5 mr-2" />
+              Créer un chantier
+            </Button>
+          </CardContent>
+        </Card>
+      ) : worksites.filter(w => worksiteFilterTab === 'ALL' || w.status === worksiteFilterTab).length === 0 ? (
+        <Card className="bg-white rounded-3xl shadow-xl">
+          <CardContent className="p-16 text-center">
+            <Building className="h-20 w-20 mx-auto mb-4 text-gray-300" />
+            <h3 className="text-2xl font-bold text-gray-900 mb-2">Aucun chantier dans cette catégorie</h3>
+            <p className="text-gray-500 mb-6">Changez de filtre pour voir d'autres chantiers</p>
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-6">
+          {worksites.filter(w => worksiteFilterTab === 'ALL' || w.status === worksiteFilterTab).map((worksite) => (
+            <Card key={worksite.id} className="bg-white rounded-2xl border-2 border-gray-100 hover:border-gray-300 hover:shadow-2xl transition-all duration-300">
+              <CardContent className="p-6">
+                <div className="flex items-start justify-between mb-4">
+                  <div className="flex-1">
+                    <h3 className="text-xl font-bold text-gray-900 mb-2">{worksite.title}</h3>
+                    <span className={`inline-block px-3 py-1 rounded-lg text-xs font-bold ${
+                      worksite.status === 'PLANNED' ? 'bg-gray-100 text-gray-700' :
+                      worksite.status === 'IN_PROGRESS' ? 'bg-gray-200 text-black' :
+                      worksite.status === 'ON_HOLD' ? 'bg-gray-100 text-gray-600' :
+                      worksite.status === 'COMPLETED' ? 'bg-black text-white' : 'bg-gray-50 text-gray-500'
+                    }`}>
+                      {worksite.status === 'PLANNED' ? '📋 Planifié' :
+                       worksite.status === 'IN_PROGRESS' ? '🔧 En cours' :
+                       worksite.status === 'ON_HOLD' ? '⏸️ En pause' :
+                       worksite.status === 'COMPLETED' ? '✅ Terminé' : worksite.status}
+                    </span>
+                  </div>
+                </div>
+
+                {worksite.clients?.name && (
+                  <p className="text-sm text-gray-600 flex items-center mb-2">
+                    <Users className="h-4 w-4 mr-2" />
+                    {worksite.clients.name}
+                  </p>
+                )}
+                
+                {worksite.address && (
+                  <p className="text-sm text-gray-600 flex items-center mb-4">
+                    <MapPin className="h-4 w-4 mr-2" />
+                    {worksite.address}
+                  </p>
+                )}
+
+                {worksite.progress !== null && worksite.progress !== undefined && (
+                  <div className="mb-4">
+                    <div className="flex justify-between text-xs text-gray-600 mb-2">
+                      <span className="font-semibold">Avancement</span>
+                      <span className="font-bold">{worksite.progress}%</span>
+                    </div>
+                    <div className="w-full bg-gray-200 rounded-full h-3">
+                      <div
+                        className="bg-black rounded-full h-3 transition-all duration-500"
+                        style={{ width: `${worksite.progress}%` }}
+                      ></div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-3 mb-4">
+                  {worksite.budget && (
+                    <div className="bg-gray-50 rounded-lg p-3">
+                      <p className="text-xs text-gray-500 mb-1">Budget</p>
+                      <p className="text-lg font-bold text-black">{parseFloat(worksite.budget).toLocaleString()}€</p>
+                    </div>
+                  )}
+                  {worksite.team_size && (
+                    <div className="bg-gray-50 rounded-lg p-3">
+                      <p className="text-xs text-gray-500 mb-1">Équipe</p>
+                      <p className="text-lg font-bold text-black">{worksite.team_size} pers.</p>
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex space-x-2">
+                  <Button
+                    size="sm"
+                    onClick={() => {
+                      setEditingWorksite(worksite);
+                      setWorksiteFormData({
+                        title: worksite.title || '',
+                        description: worksite.description || '',
+                        address: worksite.address || '',
+                        client_id: worksite.client_id || '',
+                        status: worksite.status || 'PLANNED',
+                        progress: worksite.progress || 0,
+                        start_date: worksite.start_date || '',
+                        end_date: worksite.end_date || '',
+                        budget: worksite.budget || '',
+                        team_size: worksite.team_size || 1,
+                        notes: worksite.notes || ''
+                      });
+                      setShowWorksiteForm(true);
+                    }}
+                    className="flex-1 bg-black hover:bg-gray-800 text-white rounded-lg"
+                  >
+                    <Edit className="h-4 w-4 mr-1" />
+                    Modifier
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={() => deleteWorksite(worksite.id)}
+                    variant="outline"
+                    className="rounded-lg border-2 border-gray-300 text-gray-600 hover:bg-gray-100"
+                  >
+                    <Trash2 className="h-4 w-4 text-red-500" />
+                  </Button>
+                </div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 // Quote Create Component with Full Workflow - Complete Implementation
-const QuoteCreate = () => {
+const QuoteCreate = ({ defaultTab = 'quotes' }) => {
+  const location = useLocation();
   const [clients, setClients] = useState([]);
   const [quotes, setQuotes] = useState([]);
   const [worksites, setWorksites] = useState([]);
+  const [schedules, setSchedules] = useState([]);
   const [trash, setTrash] = useState([]);
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [showClientForm, setShowClientForm] = useState(false);
-  const [activeTab, setActiveTab] = useState('quotes');
+  const [activeTab, setActiveTab] = useState(defaultTab);
   const [searchTerm, setSearchTerm] = useState('');
   const [editingQuote, setEditingQuote] = useState(null);
   const [isEditMode, setIsEditMode] = useState(false); // Mode édition pour le formulaire principal
   const [expandedColumn, setExpandedColumn] = useState(null); // Pour le menu déroulant des colonnes
+  const [selectedWorksiteQuote, setSelectedWorksiteQuote] = useState(null); // Pour afficher le devis d'un chantier
+  const [worksiteStatusFilter, setWorksiteStatusFilter] = useState('ALL'); // Filtre statut chantiers: ALL, PLANNED, IN_PROGRESS, COMPLETED
   
   // NEW: Templates management states
   const [showTemplates, setShowTemplates] = useState(false);
@@ -7139,15 +10411,23 @@ const QuoteCreate = () => {
     category: 'standard',
     items: [{ name: '', description: '', unit_price: 0, default_quantity: 1 }]
   });
+  // States pour l'autocomplétion du catalogue dans les templates
+  const [templateItemSuggestions, setTemplateItemSuggestions] = useState({});
+  const [templateDescSuggestions, setTemplateDescSuggestions] = useState({});
   
   const [formData, setFormData] = useState({
     client_id: '',
     client_name: '', // Nom du client (manuel ou sélectionné)
+    client_first_name: '', // Prénom du nouveau client
+    client_last_name: '', // Nom du nouveau client
+    client_phone: '', // Téléphone du nouveau client
+    client_email: '', // Email du nouveau client
     title: '',
     description: '',
     amount: '',
     status: 'DRAFT', // Statut par défaut
-    items: [{ name: '', quantity: 1, price: 0, total: 0 }]
+    tva_rate: 20, // Taux de TVA par défaut (20%)
+    items: [{ name: '', description: '', quantity: 1, price: 0, total: 0, tva_rate: 20 }]
   });
   
   // États pour l'autocomplétion des clients
@@ -7159,6 +10439,21 @@ const QuoteCreate = () => {
   const [itemSearchStates, setItemSearchStates] = useState({});
   const [showItemSuggestions, setShowItemSuggestions] = useState({});
   const [catalogProducts, setCatalogProducts] = useState([]);
+  const [showCatalogModal, setShowCatalogModal] = useState(false);
+  const [catalogSearchTerm, setCatalogSearchTerm] = useState('');
+  
+  // Taux de TVA disponibles (conformité France)
+  const tvaRates = [
+    { value: 20, label: '20% - Taux normal', description: 'Matériel, prestations générales' },
+    { value: 10, label: '10% - Taux intermédiaire', description: 'Travaux d\'amélioration, transformation, entretien' },
+    { value: 5.5, label: '5,5% - Taux réduit', description: 'Rénovation énergétique, isolation' },
+    { value: 0, label: '0% - Non applicable', description: 'Auto-liquidation, intracommunautaire' },
+    { value: -1, label: 'Exonéré de TVA', description: 'Art. 293B du CGI - TVA non applicable' }
+  ];
+  
+  // État pour les photos du devis
+  const [quotePhotos, setQuotePhotos] = useState([]);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
   
   const [clientData, setClientData] = useState({
     nom: '',
@@ -7168,11 +10463,93 @@ const QuoteCreate = () => {
     domaine: 'BTP'
   });
 
+  // États pour la gestion des chantiers
+  const [showWorksiteForm, setShowWorksiteForm] = useState(false);
+  const [editingWorksite, setEditingWorksite] = useState(null);
+  const [worksiteFormData, setWorksiteFormData] = useState({
+    title: '',
+    description: '',
+    address: '',
+    client_id: '',
+    status: 'PLANNED',
+    progress: 0,
+    start_date: '',
+    end_date: '',
+    budget: '',
+    team_size: 1,
+    notes: ''
+  });
+
+  // États pour le modal de planification
+  const [showPlanningModal, setShowPlanningModal] = useState(false);
+  const [selectedWorksiteForPlanning, setSelectedWorksiteForPlanning] = useState(null);
+  const [teamLeaders, setTeamLeaders] = useState([]);
+  const [collaborators, setCollaborators] = useState([]);
+  const [planningData, setPlanningData] = useState({
+    team_leader_id: '',
+    collaborator_ids: [],
+    start_date: '',
+    end_date: '',
+    notes: ''
+  });
+
   useEffect(() => {
     loadData();
     loadWorksites();
+    loadSchedules();
     loadCatalogProducts();
+    loadTemplates(); // Charger les templates de devis
   }, []);
+
+  // 🔵 Gérer les données de projet venant de Mon Entreprise
+  useEffect(() => {
+    if (location.state?.fromProject && location.state?.project && clients.length > 0) {
+      const { project, client_id } = location.state;
+      const client = clients.find(c => c.id === (client_id || project.client_id));
+      
+      console.log('✅ Pré-remplissage du devis depuis projet:', project);
+      console.log('✅ Client trouvé:', client);
+      
+      if (client) {
+        // Mettre à jour le champ de recherche client pour l'affichage
+        setClientSearch(`${client.nom} ${client.prenom || ''}`.trim());
+      }
+      
+      setFormData({
+        client_id: client_id || project.client_id,
+        client_name: client ? `${client.nom} ${client.prenom || ''}`.trim() : '',
+        title: `Devis - ${project.name}`,
+        description: project.notes || '',
+        amount: project.estimated_value || '',
+        status: 'DRAFT',
+        tva_rate: 20,
+        items: [{ name: '', quantity: 1, price: 0, total: 0, tva_rate: 20 }]
+      });
+      
+      setShowForm(true);
+      setActiveTab('quotes');
+      
+      // Nettoyer le state pour éviter re-trigger
+      window.history.replaceState({}, document.title);
+    }
+  }, [location.state, clients]);
+
+  const loadSchedules = async () => {
+    try {
+      const response = await axios.get(`${API}/schedules`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      setSchedules(response.data || []);
+    } catch (error) {
+      console.error('Erreur chargement schedules:', error);
+      setSchedules([]);
+    }
+  };
+
+  // Fonction helper pour vérifier si un chantier a des schedules
+  const hasSchedule = (worksiteId) => {
+    return schedules.some(schedule => schedule.worksite_id === worksiteId);
+  };
 
   const loadData = async () => {
     try {
@@ -7186,7 +10563,7 @@ const QuoteCreate = () => {
       ]);
       
       setClients(clientsRes.data);
-      setQuotes(quotesRes.data);
+      setQuotes(quotesRes.data.data || []);
       
       setTrash([]);
       
@@ -7197,18 +10574,47 @@ const QuoteCreate = () => {
     }
   };
 
-  const loadCatalogProducts = () => {
-    // Charger les produits du catalogue (simulation)
-    const products = [
-      { id: '1', name: 'Détection réseaux électriques', price: 150, unit: 'mètre linéaire' },
-      { id: '2', name: 'Recherche canalisations eau', price: 120, unit: 'mètre linéaire' },
-      { id: '3', name: 'Inspection vidéo canalisation', price: 200, unit: 'mètre linéaire' },
-      { id: '4', name: 'Localisation géoradar', price: 180, unit: 'mètre linéaire' },
-      { id: '5', name: 'Détection gaz', price: 140, unit: 'mètre linéaire' },
-      { id: '6', name: 'Réparation fuite d\'eau', price: 250, unit: 'intervention' },
-      { id: '7', name: 'Débouchage canalisation', price: 180, unit: 'intervention' }
-    ];
-    setCatalogProducts(products);
+  const loadWorksites = async () => {
+    try {
+      const response = await axios.get(`${API}/worksites`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      setWorksites(response.data);
+    } catch (error) {
+      console.error('Erreur chargement chantiers:', error);
+      setWorksites([]);
+    }
+  };
+
+  const loadTeamData = async () => {
+    try {
+      const headers = { 'Authorization': `Bearer ${localStorage.getItem('token')}` };
+      const [leadersRes, collabRes] = await Promise.all([
+        axios.get(`${API}/team-leaders`, { headers }),
+        axios.get(`${API}/collaborators`, { headers })
+      ]);
+      setTeamLeaders(leadersRes.data || []);
+      setCollaborators(collabRes.data || []);
+    } catch (error) {
+      console.error('Erreur chargement équipes:', error);
+    }
+  };
+
+  const openPlanningModal = (worksite) => {
+    // Rediriger vers le planning avec les données du chantier
+    window.location.href = `/bureau/planning?worksite=${worksite.id}&action=plan`;
+  };
+
+  const loadCatalogProducts = async () => {
+    try {
+      const response = await axios.get(`${API}/catalog/products`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      setCatalogProducts(response.data.data || []);
+    } catch (error) {
+      console.error('Erreur lors du chargement des produits du catalogue:', error);
+      setCatalogProducts([]);
+    }
   };
 
   const addQuickClient = async () => {
@@ -7274,6 +10680,7 @@ const QuoteCreate = () => {
     updatedItems[index] = {
       ...updatedItems[index],
       name: product.name,
+      description: product.description || product.unit || '',
       price: product.price,
       quantity: updatedItems[index].quantity || 1,
       total: product.price * (updatedItems[index].quantity || 1)
@@ -7293,25 +10700,267 @@ const QuoteCreate = () => {
     );
   };
 
-  const acceptQuote = async (quoteId) => {
+  const handlePhotoUpload = async (e) => {
+    const files = Array.from(e.target.files);
+    if (files.length === 0) return;
+
+    setUploadingPhoto(true);
     try {
-      // 1. Mettre à jour le statut du devis à ACCEPTED
+      const newPhotos = [];
+      for (const file of files) {
+        // Créer une preview en base64
+        const reader = new FileReader();
+        const base64Promise = new Promise((resolve) => {
+          reader.onloadend = () => {
+            resolve(reader.result);
+          };
+          reader.readAsDataURL(file);
+        });
+        
+        const base64 = await base64Promise;
+        newPhotos.push({
+          id: Date.now() + Math.random(),
+          file,
+          preview: base64,
+          name: file.name
+        });
+      }
+      
+      setQuotePhotos(prev => [...prev, ...newPhotos]);
+      alert(`${files.length} photo(s) ajoutée(s) au devis`);
+    } catch (error) {
+      console.error('Erreur upload photo:', error);
+      alert('Erreur lors de l\'ajout des photos');
+    } finally {
+      setUploadingPhoto(false);
+    }
+  };
+
+  const removePhoto = (photoId) => {
+    setQuotePhotos(prev => prev.filter(p => p.id !== photoId));
+  };
+
+  const handleItemPhotoUpload = async (itemIndex, e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (!file.type.startsWith('image/')) {
+      alert('Veuillez sélectionner une image');
+      return;
+    }
+
+    if (file.size > 5 * 1024 * 1024) {
+      alert('La photo ne doit pas dépasser 5 MB');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const photoData = {
+        name: file.name,
+        type: file.type,
+        data: reader.result,
+        preview: reader.result
+      };
+      
+      // Mettre à jour l'item avec la photo
+      setFormData(prev => {
+        const newItems = [...prev.items];
+        newItems[itemIndex] = {
+          ...newItems[itemIndex],
+          photo: photoData
+        };
+        return { ...prev, items: newItems };
+      });
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const removeItemPhoto = (itemIndex) => {
+    setFormData(prev => {
+      const newItems = [...prev.items];
+      newItems[itemIndex] = {
+        ...newItems[itemIndex],
+        photo: null
+      };
+      return { ...prev, items: newItems };
+    });
+  };
+
+  const sendQuote = async (quoteId) => {
+    try {
       await axios.put(`${API}/quotes/${quoteId}`, {
-        status: 'ACCEPTED'
+        status: 'SENT'
       }, {
         headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
       });
 
-      // 2. Convertir automatiquement en chantier
-      await axios.post(`${API}/quotes/${quoteId}/convert-to-worksite`, {}, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-      });
-
-      alert('Devis accepté et chantier créé avec succès !');
+      alert('✅ Devis envoyé au client !');
       loadData();
     } catch (error) {
-      console.error('Erreur acceptation devis:', error);
-      alert('Erreur lors de l\'acceptation du devis');
+      console.error('Erreur envoi devis:', error);
+      alert('Erreur lors de l\'envoi du devis');
+    }
+  };
+
+  const downloadQuotePDF = async (quoteId, retryCount = 0) => {
+    try {
+      const quote = quotes.find(q => q.id === quoteId);
+      if (!quote) {
+        alert('❌ Devis non trouvé');
+        return;
+      }
+
+      // Récupérer le token actuel
+      let token = localStorage.getItem('token');
+      if (!token) {
+        alert('⚠️ Session expirée. Veuillez vous reconnecter.');
+        return;
+      }
+
+      // Appeler la route backend pour générer le PDF
+      const response = await axios.get(`${API}/quotes/${quoteId}/pdf`, {
+        headers: { 'Authorization': `Bearer ${token}` },
+        responseType: 'blob'
+      });
+
+      // Créer un lien de téléchargement
+      const url = window.URL.createObjectURL(new Blob([response.data]));
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `Devis_${quote.quote_number || quoteId}.pdf`);
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+
+      alert('✅ PDF téléchargé avec succès !');
+    } catch (error) {
+      console.error('Erreur téléchargement PDF:', error);
+      
+      // Si erreur 401 et qu'on n'a pas encore retry, tenter de refresh le token
+      if (error.response?.status === 401 && retryCount === 0) {
+        console.log('🔄 Token expiré, tentative de refresh...');
+        try {
+          // Rafraîchir le token activement
+          const refreshToken = localStorage.getItem('refreshToken');
+          if (refreshToken) {
+            const refreshResponse = await axios.post(`${API}/auth/refresh`, {
+              refresh_token: refreshToken
+            });
+            
+            if (refreshResponse.data.token) {
+              localStorage.setItem('token', refreshResponse.data.token);
+              console.log('✅ Token rafraîchi, nouvelle tentative...');
+              // Retry avec le nouveau token
+              return downloadQuotePDF(quoteId, 1);
+            }
+          }
+        } catch (refreshError) {
+          console.error('Erreur refresh token:', refreshError);
+        }
+      }
+      
+      alert('❌ Erreur lors du téléchargement du PDF');
+    }
+  };
+
+  const acceptQuote = async (quoteId) => {
+    try {
+      const token = localStorage.getItem('token');
+      console.log('🔑 Token présent:', !!token);
+      
+      if (!token) {
+        alert('Session expirée. Veuillez vous reconnecter.');
+        return;
+      }
+      
+      // Récupérer les détails du devis
+      const quote = quotes.find(q => q.id === quoteId);
+      if (!quote) {
+        alert('Devis non trouvé');
+        return;
+      }
+
+      // Chercher le projet associé au devis via search_id ou client
+      let projectId = null;
+      try {
+        const projectsRes = await axios.get(`${API}/projects`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        
+        // Chercher un projet qui a ce devis ou ce client
+        const matchingProject = projectsRes.data.find(p => 
+          p.client_id === quote.client_id || 
+          (p.name && quote.title && p.name.includes(quote.title.substring(0, 20)))
+        );
+        
+        if (matchingProject) {
+          projectId = matchingProject.id;
+          console.log('✅ Projet trouvé pour le devis:', projectId);
+        } else {
+          console.log('⚠️ Aucun projet trouvé pour ce devis');
+        }
+      } catch (err) {
+        console.error('Erreur recherche projet:', err);
+      }
+
+      // Créer directement un chantier basé sur le devis
+      const worksiteTitle = quote.title && quote.title.trim() !== '' 
+        ? quote.title 
+        : `Chantier ${quote.client_name || 'Client'} - Devis #${quote.quote_number || ''}`;
+      
+      console.log('📤 Création chantier...', { 
+        title: worksiteTitle, 
+        client_id: quote.client_id,
+        project_id: projectId 
+      });
+      
+      const worksiteData = {
+        title: worksiteTitle,
+        description: quote.description || '',
+        client_id: quote.client_id,
+        client_name: quote.client_name || '',
+        status: 'PLANNED',
+        quote_id: quoteId,
+        amount: quote.amount || 0,
+        source: 'QUOTE'
+      };
+      
+      // Ajouter project_id si disponible
+      if (projectId) {
+        worksiteData.project_id = projectId;
+      }
+      
+      await axios.post(`${API}/worksites`, worksiteData, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+
+      // Mettre à jour le statut du devis à CONVERTED_TO_WORKSITE
+      await axios.put(`${API}/quotes/${quoteId}`, {
+        status: 'CONVERTED_TO_WORKSITE'
+      }, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+
+      // Fermer le panneau détaillé s'il est ouvert
+      setExpandedColumn(null);
+      
+      // Recharger les données
+      await loadData();
+      await loadWorksites();
+      
+      alert('✅ Chantier créé avec succès !')
+    } catch (error) {
+      console.error('Erreur création chantier:', error);
+      
+      if (error.response?.status === 401) {
+        alert('Session expirée. Veuillez vous reconnecter.');
+        // Optionnel: rediriger vers la page de connexion
+        // window.location.href = '/login';
+      } else {
+        alert(`Erreur lors de la création du chantier: ${error.response?.data?.detail || error.message}`);
+      }
     }
   };
 
@@ -7341,8 +10990,9 @@ const QuoteCreate = () => {
         headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
       });
 
+      // Mise à jour immédiate du state local pour refléter la suppression
+      setQuotes(prevQuotes => prevQuotes.filter(q => q.id !== quoteId));
       alert('Devis supprimé avec succès');
-      loadData();
     } catch (error) {
       console.error('Erreur suppression devis:', error);
       alert('Erreur lors de la suppression du devis');
@@ -7350,43 +11000,35 @@ const QuoteCreate = () => {
   };
 
   const editQuote = (quote) => {
+    console.log('📝 Édition du devis:', quote);
+    console.log('📊 Items avec photos:', quote.items?.filter(i => i.photo).length || 0);
+    
     setEditingQuote(quote);
     setIsEditMode(true);
+    
+    // Copier les items en préservant les photos
+    const itemsWithPhotos = (quote.items || [{ name: '', description: '', quantity: 1, price: 0, total: 0 }]).map(item => ({
+      ...item,
+      // S'assurer que la photo est préservée
+      photo: item.photo || null
+    }));
+    
     setFormData({
       client_id: quote.client_id,
       title: quote.title,
       description: quote.description,
       amount: quote.amount,
       status: quote.status || 'DRAFT',
-      items: quote.items || [{ name: '', quantity: 1, price: 0, total: 0 }]
+      items: itemsWithPhotos
     });
+    
+    console.log('✅ FormData chargé avec', itemsWithPhotos.length, 'items');
+    
     setShowForm(true); // Ouvre le formulaire principal au lieu du modal
     // Scroll vers le formulaire
     setTimeout(() => {
       window.scrollTo({ top: 0, behavior: 'smooth' });
     }, 100);
-  };
-
-  const sendQuote = async (quote) => {
-    try {
-      // Mettre automatiquement le statut à SENT (filtrer les champs)
-      await axios.put(`${API}/quotes/${quote.id}`, {
-        client_id: quote.client_id,
-        title: quote.title,
-        description: quote.description,
-        amount: quote.amount,
-        status: 'SENT',
-        items: quote.items || []
-      }, {
-        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-      });
-      
-      alert(`✉️ Devis "${quote.title}" marqué comme envoyé !\n\n📧 Email automatique à venir...`);
-      loadData(); // Recharger les données
-    } catch (error) {
-      console.error('Erreur envoi devis:', error);
-      alert('Erreur lors de l\'envoi du devis');
-    }
   };
 
   const restoreFromTrash = async (trashItemId) => {
@@ -7410,26 +11052,62 @@ const QuoteCreate = () => {
   };
 
   // Charger aussi les chantiers depuis le backend
-  const loadWorksites = async () => {
+  // Créer ou modifier un chantier
+  const saveWorksite = async (e) => {
+    e.preventDefault();
     try {
-      const response = await axios.get(`${API}/worksites`, {
+      if (editingWorksite) {
+        // Modification
+        await axios.put(`${API}/worksites/${editingWorksite.id}`, worksiteFormData, {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        });
+        alert('Chantier modifié avec succès !');
+      } else {
+        // Création
+        await axios.post(`${API}/worksites`, worksiteFormData, {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        });
+        alert('Chantier créé avec succès !');
+      }
+
+      // Réinitialiser le formulaire
+      setWorksiteFormData({
+        title: '',
+        description: '',
+        address: '',
+        client_id: '',
+        status: 'PLANNED',
+        progress: 0,
+        start_date: '',
+        end_date: '',
+        budget: '',
+        team_size: 1,
+        notes: ''
+      });
+      setShowWorksiteForm(false);
+      setEditingWorksite(null);
+      loadWorksites();
+    } catch (error) {
+      console.error('Erreur sauvegarde chantier:', error);
+      alert('Erreur lors de la sauvegarde du chantier');
+    }
+  };
+
+  // Supprimer un chantier
+  const deleteWorksite = async (worksiteId) => {
+    if (!window.confirm('Êtes-vous sûr de vouloir supprimer ce chantier ? Cette action est irréversible.')) {
+      return;
+    }
+
+    try {
+      await axios.delete(`${API}/worksites/${worksiteId}`, {
         headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
       });
-      setWorksites(response.data);
+      alert('Chantier supprimé avec succès');
+      loadWorksites();
     } catch (error) {
-      console.error('Erreur chargement chantiers:', error);
-      // Utiliser des données simulées si l'endpoint n'est pas disponible
-      setWorksites([
-        {
-          id: '1',
-          title: 'Chantier Boulevard Saint-Michel',
-          client_name: 'Entreprise Martin',
-          status: 'IN_PROGRESS',
-          source: 'QUOTE',
-          quote_pdf_url: '/api/quotes/pdf/1',
-          created_at: new Date().toISOString()
-        }
-      ]);
+      console.error('Erreur suppression chantier:', error);
+      alert('Erreur lors de la suppression du chantier');
     }
   };
 
@@ -7437,7 +11115,6 @@ const QuoteCreate = () => {
     switch (status) {
       case 'DRAFT': return 'bg-yellow-100 text-yellow-700 border-yellow-200';
       case 'SENT': return 'bg-blue-100 text-blue-700 border-blue-200';
-      case 'ACCEPTED': return 'bg-green-100 text-green-700 border-green-200';
       case 'REJECTED': return 'bg-red-100 text-red-700 border-red-200';
       case 'TRASHED': return 'bg-gray-100 text-gray-700 border-gray-200';
       default: return 'bg-gray-100 text-gray-700 border-gray-200';
@@ -7448,11 +11125,34 @@ const QuoteCreate = () => {
     return formData.items.reduce((sum, item) => sum + (item.quantity * item.price), 0);
   };
 
+  // Calculer le TTC d'un devis à partir de ses items
+  const calculateQuoteTTC = (quote) => {
+    if (!quote.items || quote.items.length === 0) {
+      // Si pas d'items, on suppose que amount est HT avec TVA 20%
+      return (quote.amount * 1.20).toFixed(2);
+    }
+    
+    let totalHT = 0;
+    let totalTVA = 0;
+    
+    quote.items.forEach(item => {
+      const itemTotal = (item.quantity || 0) * (item.price || 0);
+      totalHT += itemTotal;
+      
+      const itemTvaRate = item.tva_rate !== undefined ? item.tva_rate : 20;
+      if (itemTvaRate >= 0) {
+        totalTVA += itemTotal * (itemTvaRate / 100);
+      }
+    });
+    
+    return (totalHT + totalTVA).toFixed(2);
+  };
+
   const addItem = () => {
     const newIndex = formData.items.length;
     setFormData(prev => ({
       ...prev,
-      items: [...prev.items, { name: '', quantity: 1, price: 0, total: 0 }]
+      items: [...prev.items, { name: '', description: '', quantity: 1, price: 0, total: 0, tva_rate: prev.tva_rate }]
     }));
     // Initialiser les états d'autocomplétion pour le nouvel item
     setItemSearchStates(prev => ({...prev, [newIndex]: ''}));
@@ -7477,13 +11177,57 @@ const QuoteCreate = () => {
     });
   };
 
+  // Calcul des totaux avec TVA (par taux)
+  const calculateTotals = () => {
+    let totalHT = 0;
+    const tvaByRate = {}; // { '20': 50.00, '10': 25.00, etc. }
+    
+    formData.items.forEach(item => {
+      const itemTotal = (item.quantity || 0) * (item.price || 0);
+      totalHT += itemTotal;
+      
+      // Calculer la TVA pour chaque ligne
+      const itemTvaRate = item.tva_rate !== undefined ? item.tva_rate : 20;
+      
+      if (itemTvaRate >= 0) {
+        const tvaAmount = itemTotal * (itemTvaRate / 100);
+        if (!tvaByRate[itemTvaRate]) {
+          tvaByRate[itemTvaRate] = 0;
+        }
+        tvaByRate[itemTvaRate] += tvaAmount;
+      }
+    });
+    
+    const totalTVA = Object.values(tvaByRate).reduce((sum, tva) => sum + tva, 0);
+    const totalTTC = totalHT + totalTVA;
+    
+    return {
+      totalHT: totalHT.toFixed(2),
+      totalTVA: totalTVA.toFixed(2),
+      totalTTC: totalTTC.toFixed(2),
+      tvaByRate: Object.entries(tvaByRate).map(([rate, amount]) => ({
+        rate: parseFloat(rate),
+        amount: amount.toFixed(2)
+      })).sort((a, b) => b.rate - a.rate) // Trier par taux décroissant
+    };
+  };
+
   const updateItem = (index, field, value) => {
-    setFormData(prev => ({
-      ...prev,
-      items: prev.items.map((item, i) => 
-        i === index ? { ...item, [field]: value } : item
-      )
-    }));
+    setFormData(prev => {
+      const newItems = prev.items.map((item, i) => {
+        if (i === index) {
+          const updatedItem = { ...item, [field]: value };
+          // Recalculer le total de la ligne si quantité ou prix change
+          if (field === 'quantity' || field === 'price') {
+            updatedItem.total = (updatedItem.quantity || 0) * (updatedItem.price || 0);
+          }
+          return updatedItem;
+        }
+        return item;
+      });
+      
+      return { ...prev, items: newItems };
+    });
   };
 
   const handleSubmit = async (e) => {
@@ -7495,23 +11239,33 @@ const QuoteCreate = () => {
       let clientId = formData.client_id;
       
       if (clientSearch && !formData.client_id) {
-        // Créer un nouveau client avec le nom saisi
+        // Créer un nouveau client avec les informations saisies
         const newClientData = {
-          nom: clientSearch,
-          email: '',
-          telephone: '',
+          nom: formData.client_last_name || clientSearch, // Nom de famille
+          prenom: formData.client_first_name || '', // Prénom
+          email: formData.client_email || '',
+          telephone: formData.client_phone || '',
           adresse: '',
           domaine: 'BTP'
         };
         
-        const clientResponse = await axios.post(`${API}/clients`, newClientData, {
-          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
-        });
-        
-        clientId = clientResponse.data.id;
-        
-        // Recharger la liste des clients
-        await loadData();
+        try {
+          const clientResponse = await axios.post(`${API}/clients`, newClientData, {
+            headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+          });
+          
+          clientId = clientResponse.data.id;
+          
+          // Recharger la liste des clients
+          await loadData();
+        } catch (clientError) {
+          console.error('Erreur création client:', clientError);
+          if (clientError.response?.status === 401) {
+            alert('⚠️ Session expirée. Veuillez vous reconnecter.');
+            return;
+          }
+          throw clientError;
+        }
       }
       
       // Préparer les données en filtrant uniquement les champs valides
@@ -7521,7 +11275,12 @@ const QuoteCreate = () => {
         description: formData.description,
         amount: calculateTotal(),
         status: formData.status,
-        items: formData.items
+        items: formData.items,
+        photos: quotePhotos.map(p => ({
+          name: p.name,
+          data: p.data,
+          type: p.type
+        }))
       };
 
       if (isEditMode && editingQuote) {
@@ -7548,12 +11307,14 @@ const QuoteCreate = () => {
         description: '',
         amount: '',
         status: 'DRAFT',
-        items: [{ name: '', quantity: 1, price: 0, total: 0 }]
+        items: [{ name: '', description: '', quantity: 1, price: 0, total: 0 }]
       });
       setClientSearch('');
       setShowClientSuggestions(false);
       setItemSearchStates({});
       setShowItemSuggestions({});
+      setQuotePhotos([]);
+      setUploadingPhoto(false);
       setShowForm(false);
       setIsEditMode(false);
       setEditingQuote(null);
@@ -7572,7 +11333,8 @@ const QuoteCreate = () => {
       const response = await axios.get(`${API}/quote-templates`, {
         headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
       });
-      setTemplates(response.data);
+      // Le backend retourne {data: [...], count: ...}
+      setTemplates(response.data.data || []);
     } catch (error) {
       console.error('Erreur chargement templates:', error);
       // Set sample templates if API fails
@@ -7706,6 +11468,74 @@ const QuoteCreate = () => {
         i === index ? { ...item, [field]: value } : item
       )
     }));
+    
+    // Si c'est le champ name, gérer l'autocomplétion
+    if (field === 'name') {
+      if (value.trim()) {
+        setTemplateItemSuggestions(prev => ({...prev, [index]: true}));
+      } else {
+        setTemplateItemSuggestions(prev => ({...prev, [index]: false}));
+      }
+    }
+    
+    // Si c'est le champ description, gérer l'autocomplétion
+    if (field === 'description') {
+      if (value.trim()) {
+        setTemplateDescSuggestions(prev => ({...prev, [index]: true}));
+      } else {
+        setTemplateDescSuggestions(prev => ({...prev, [index]: false}));
+      }
+    }
+  };
+  
+  const getFilteredTemplateProducts = (index) => {
+    const searchTerm = templateFormData.items[index]?.name || '';
+    if (!searchTerm.trim()) return [];
+    
+    return catalogProducts.filter(product =>
+      product.name.toLowerCase().includes(searchTerm.toLowerCase())
+    );
+  };
+  
+  const selectTemplateProduct = (index, product) => {
+    setTemplateFormData(prev => ({
+      ...prev,
+      items: prev.items.map((item, i) => 
+        i === index ? {
+          ...item,
+          name: product.name,
+          description: product.description || product.unit || '',
+          unit_price: product.price || 0
+        } : item
+      )
+    }));
+    setTemplateItemSuggestions(prev => ({...prev, [index]: false}));
+  };
+  
+  const getFilteredTemplateProductsByDesc = (index) => {
+    const searchTerm = templateFormData.items[index]?.description || '';
+    if (!searchTerm.trim()) return [];
+    
+    return catalogProducts.filter(product =>
+      (product.description && product.description.toLowerCase().includes(searchTerm.toLowerCase())) ||
+      (product.unit && product.unit.toLowerCase().includes(searchTerm.toLowerCase())) ||
+      (product.name && product.name.toLowerCase().includes(searchTerm.toLowerCase()))
+    );
+  };
+  
+  const selectTemplateProductByDesc = (index, product) => {
+    setTemplateFormData(prev => ({
+      ...prev,
+      items: prev.items.map((item, i) => 
+        i === index ? {
+          ...item,
+          name: product.name,
+          description: product.description || product.unit || '',
+          unit_price: product.price || 0
+        } : item
+      )
+    }));
+    setTemplateDescSuggestions(prev => ({...prev, [index]: false}));
   };
 
   const removeTemplateItem = (index) => {
@@ -7739,18 +11569,12 @@ const QuoteCreate = () => {
             </div>
             
             {/* KPI Dashboard */}
-            <div className="grid grid-cols-2 lg:grid-cols-4 gap-4 w-full lg:w-auto">
+            <div className="grid grid-cols-2 lg:grid-cols-3 gap-4 w-full lg:w-auto">
               <div className="bg-white/10 backdrop-blur-sm rounded-2xl p-4 text-center">
                 <div className="text-2xl font-bold text-white">
-                  {quotes.filter(q => q.status !== 'TRASHED').length}
+                  {quotes.filter(q => q.status !== 'TRASHED' && q.status !== 'CONVERTED_TO_WORKSITE').length}
                 </div>
                 <div className="text-xs text-gray-300 uppercase tracking-wide">Devis Actifs</div>
-              </div>
-              <div className="bg-white/10 backdrop-blur-sm rounded-2xl p-4 text-center">
-                <div className="text-2xl font-bold text-green-400">
-                  {quotes.filter(q => q.status === 'ACCEPTED').length}
-                </div>
-                <div className="text-xs text-gray-300 uppercase tracking-wide">Acceptés</div>
               </div>
               <div className="bg-white/10 backdrop-blur-sm rounded-2xl p-4 text-center">
                 <div className="text-2xl font-bold text-orange-400">
@@ -7759,15 +11583,15 @@ const QuoteCreate = () => {
                 <div className="text-xs text-gray-300 uppercase tracking-wide">En Attente</div>
               </div>
               <div className="bg-white/10 backdrop-blur-sm rounded-2xl p-4 text-center">
-                <div className="text-2xl font-bold text-purple-400">
-                  {Math.round((quotes.filter(q => q.status === 'ACCEPTED').length / Math.max(quotes.filter(q => q.status !== 'TRASHED').length, 1)) * 100)}%
+                <div className="text-2xl font-bold text-blue-400">
+                  {quotes.filter(q => q.status === 'SENT').length}
                 </div>
-                <div className="text-xs text-gray-300 uppercase tracking-wide">Taux Conversion</div>
+                <div className="text-xs text-gray-300 uppercase tracking-wide">Envoyés</div>
               </div>
             </div>
           </div>
           
-          {/* Actions rapides + Barre de recherche */}
+          {/* Actions rapides */}
           <div className="flex flex-wrap gap-3 mt-6 items-center">
             <Button
               onClick={() => setShowForm(true)}
@@ -7783,20 +11607,6 @@ const QuoteCreate = () => {
               <UserPlus className="h-4 w-4 mr-2" />
               Nouveau Client
             </Button>
-            
-            {/* Barre de recherche */}
-            <div className="flex-1 min-w-[300px]">
-              <div className="relative">
-                <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400" />
-                <input
-                  type="text"
-                  placeholder="Rechercher par titre, client, montant..."
-                  value={searchTerm}
-                  onChange={(e) => setSearchTerm(e.target.value)}
-                  className="w-full pl-10 pr-4 py-2 bg-white/20 backdrop-blur-sm border border-white/30 rounded-2xl text-white placeholder-gray-300 focus:outline-none focus:ring-2 focus:ring-white/50"
-                />
-              </div>
-            </div>
             <Button
               onClick={() => {
                 setShowTemplates(true);
@@ -7845,7 +11655,6 @@ const QuoteCreate = () => {
                 <option value="">Tous statuts</option>
                 <option value="DRAFT">Brouillon</option>
                 <option value="SENT">Envoyé</option>
-                <option value="ACCEPTED">Accepté</option>
                 <option value="REJECTED">Refusé</option>
                 <option value="CONVERTED_TO_WORKSITE">Converti</option>
               </select>
@@ -8012,11 +11821,16 @@ const QuoteCreate = () => {
                   setEditingQuote(null);
                   setFormData({
                     client_id: '',
+                    client_name: '',
+                    client_first_name: '',
+                    client_last_name: '',
+                    client_phone: '',
+                    client_email: '',
                     title: '',
                     description: '',
                     amount: '',
                     status: 'DRAFT',
-                    items: [{ name: '', quantity: 1, price: 0, total: 0 }]
+                    items: [{ name: '', description: '', quantity: 1, price: 0, total: 0 }]
                   });
                 }}
                 variant="ghost"
@@ -8095,6 +11909,66 @@ const QuoteCreate = () => {
                   )}
                 </div>
                 
+                {/* Champs supplémentaires pour nouveau client */}
+                {clientSearch && !formData.client_id && (
+                  <div className="md:col-span-2 bg-blue-50 border border-blue-200 rounded-xl p-6 space-y-4">
+                    <h4 className="text-sm font-semibold text-gray-900 mb-3 flex items-center">
+                      <User className="h-4 w-4 mr-2 text-blue-600" />
+                      Informations du nouveau client
+                    </h4>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          Prénom
+                        </label>
+                        <Input
+                          type="text"
+                          value={formData.client_first_name || ''}
+                          onChange={(e) => setFormData(prev => ({...prev, client_first_name: e.target.value}))}
+                          placeholder="Ex: Jean"
+                          className="rounded-xl border-gray-200 focus:border-blue-500 focus:ring-blue-500/20"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          Nom
+                        </label>
+                        <Input
+                          type="text"
+                          value={formData.client_last_name || ''}
+                          onChange={(e) => setFormData(prev => ({...prev, client_last_name: e.target.value}))}
+                          placeholder="Ex: Dupont"
+                          className="rounded-xl border-gray-200 focus:border-blue-500 focus:ring-blue-500/20"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          Numéro de téléphone
+                        </label>
+                        <Input
+                          type="tel"
+                          value={formData.client_phone || ''}
+                          onChange={(e) => setFormData(prev => ({...prev, client_phone: e.target.value}))}
+                          placeholder="Ex: 06 12 34 56 78"
+                          className="rounded-xl border-gray-200 focus:border-blue-500 focus:ring-blue-500/20"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          Email
+                        </label>
+                        <Input
+                          type="email"
+                          value={formData.client_email || ''}
+                          onChange={(e) => setFormData(prev => ({...prev, client_email: e.target.value}))}
+                          placeholder="Ex: jean.dupont@email.com"
+                          className="rounded-xl border-gray-200 focus:border-blue-500 focus:ring-blue-500/20"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+                
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-2">Statut du devis</label>
                   <select
@@ -8105,22 +11979,56 @@ const QuoteCreate = () => {
                       backgroundColor: 
                         formData.status === 'DRAFT' ? '#FEF3C7' :
                         formData.status === 'SENT' ? '#DBEAFE' :
-                        formData.status === 'ACCEPTED' ? '#D1FAE5' :
                         formData.status === 'REJECTED' ? '#FEE2E2' : '#FFFFFF',
                       color: 
                         formData.status === 'DRAFT' ? '#92400E' :
                         formData.status === 'SENT' ? '#1E40AF' :
-                        formData.status === 'ACCEPTED' ? '#065F46' :
                         formData.status === 'REJECTED' ? '#991B1B' : '#374151'
                     }}
                   >
                     <option value="DRAFT" style={{backgroundColor: '#FEF3C7', color: '#92400E'}}>📋 Brouillon</option>
                     <option value="SENT" style={{backgroundColor: '#DBEAFE', color: '#1E40AF'}}>✉️ Envoyé</option>
-                    <option value="ACCEPTED" style={{backgroundColor: '#D1FAE5', color: '#065F46'}}>✅ Accepté</option>
                     <option value="REJECTED" style={{backgroundColor: '#FEE2E2', color: '#991B1B'}}>❌ Refusé</option>
                   </select>
                 </div>
               </div>
+
+              {/* Numéro de référence (en mode édition uniquement) */}
+              {isEditMode && editingQuote?.quote_number && (
+                <div className="bg-gradient-to-r from-purple-50 to-blue-50 border border-purple-200 rounded-xl p-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <label className="block text-sm font-medium text-gray-700 mb-1">Référence du devis</label>
+                      <div className="text-2xl font-bold text-purple-900 font-mono">
+                        #{editingQuote.quote_number}
+                      </div>
+                    </div>
+                    <div className="bg-purple-100 rounded-full p-3">
+                      <FileText className="h-6 w-6 text-purple-600" />
+                    </div>
+                  </div>
+                  <p className="text-xs text-gray-600 mt-2">
+                    Ce numéro est généré automatiquement et ne peut pas être modifié
+                  </p>
+                </div>
+              )}
+
+              {/* Nouveau devis : Info sur génération auto */}
+              {!isEditMode && (
+                <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-200 rounded-xl p-4">
+                  <div className="flex items-start space-x-3">
+                    <div className="bg-blue-100 rounded-full p-2 mt-0.5">
+                      <FileText className="h-5 w-5 text-blue-600" />
+                    </div>
+                    <div className="flex-1">
+                      <h4 className="text-sm font-semibold text-gray-900 mb-1">Numéro de référence automatique</h4>
+                      <p className="text-xs text-gray-600">
+                        Un numéro unique sera généré automatiquement lors de la création du devis (format: YYYYMM-XXX)
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              )}
 
               <div className="grid grid-cols-1 md:grid-cols-1 gap-6">
                 <div>
@@ -8155,10 +12063,7 @@ const QuoteCreate = () => {
                   <div className="flex gap-2">
                     <Button
                       type="button"
-                      onClick={() => {
-                        alert('💡 Astuce: Allez dans Menu → Catalogue pour gérer vos produits.\n\nPuis revenez ici pour les importer dans vos devis.');
-                        window.open('/bureau/catalogue', '_blank');
-                      }}
+                      onClick={() => setShowCatalogModal(true)}
                       size="sm"
                       variant="outline"
                       className="rounded-xl border-indigo-200 text-indigo-700 hover:bg-indigo-50"
@@ -8178,10 +12083,20 @@ const QuoteCreate = () => {
                   </div>
                 </div>
                 
+                {/* En-tête des colonnes */}
+                <div className="grid grid-cols-12 gap-3 items-start mb-2 px-2 text-xs font-semibold text-gray-500 uppercase">
+                  <div className="col-span-5">Article / Prestation</div>
+                  <div className="col-span-1 text-center">Qté</div>
+                  <div className="col-span-2 text-center">Prix HT</div>
+                  <div className="col-span-1 text-center">TVA</div>
+                  <div className="col-span-2 text-center">Total HT</div>
+                  <div className="col-span-1"></div>
+                </div>
+
                 <div className="space-y-3">
                   {formData.items.map((item, index) => (
-                    <div key={index} className="grid grid-cols-12 gap-3 items-center relative">
-                      <div className="col-span-5 relative">
+                    <div key={index} className="grid grid-cols-12 gap-3 items-start relative bg-gray-50 p-3 rounded-xl">
+                      <div className="col-span-5 relative space-y-2">
                         <Input
                           value={item.name}
                           onChange={(e) => handleItemNameChange(index, e.target.value)}
@@ -8201,11 +12116,14 @@ const QuoteCreate = () => {
                                 className="w-full text-left px-4 py-3 hover:bg-purple-50 transition-colors border-b last:border-0"
                               >
                                 <div className="flex justify-between items-start">
-                                  <div>
+                                  <div className="flex-1 mr-3">
                                     <div className="font-medium text-gray-900">{product.name}</div>
+                                    {product.description && (
+                                      <div className="text-xs text-gray-600 mt-1">{product.description}</div>
+                                    )}
                                     <div className="text-xs text-gray-500 mt-0.5">{product.unit}</div>
                                   </div>
-                                  <div className="text-sm font-semibold text-purple-600">{product.price}€</div>
+                                  <div className="text-sm font-semibold text-purple-600 whitespace-nowrap">{product.price}€</div>
                                 </div>
                               </button>
                             ))}
@@ -8218,31 +12136,96 @@ const QuoteCreate = () => {
                             Nouvel article personnalisé
                           </p>
                         )}
+                        
+                        {/* Champ Description */}
+                        <textarea
+                          value={item.description || ''}
+                          onChange={(e) => updateItem(index, 'description', e.target.value)}
+                          placeholder="Description de l'article (optionnel)"
+                          rows={2}
+                          className="w-full rounded-xl border border-gray-200 focus:border-purple-500 focus:ring-purple-500/20 transition-all duration-200 p-2 resize-none text-sm"
+                        />
+                        
+                        {/* Bouton Photo pour l'article */}
+                        <div className="flex items-center gap-2 mt-2">
+                          <label className="flex-1 cursor-pointer">
+                            <div className="flex items-center gap-2 px-3 py-1.5 border border-gray-300 rounded-lg hover:border-purple-400 hover:bg-purple-50 transition-all">
+                              <Camera className="h-3.5 w-3.5 text-gray-500" />
+                              <span className="text-xs text-gray-600">Photo</span>
+                            </div>
+                            <input
+                              type="file"
+                              accept="image/*"
+                              onChange={(e) => handleItemPhotoUpload(index, e)}
+                              className="hidden"
+                            />
+                          </label>
+                          {item.photo && (
+                            <div className="relative group">
+                              <img
+                                src={item.photo.preview}
+                                alt="Photo article"
+                                className="h-10 w-10 object-cover rounded-lg border border-gray-200 cursor-pointer"
+                                onClick={() => {
+                                  // Agrandir l'image au clic
+                                  window.open(item.photo.preview, '_blank');
+                                }}
+                              />
+                              <button
+                                type="button"
+                                onClick={() => removeItemPhoto(index)}
+                                className="absolute -top-1 -right-1 bg-red-500 text-white rounded-full p-0.5 opacity-0 group-hover:opacity-100 transition-opacity"
+                              >
+                                <X className="h-3 w-3" />
+                              </button>
+                            </div>
+                          )}
+                        </div>
                       </div>
-                      <div className="col-span-2">
+                      
+                      <div className="col-span-1">
                         <Input
                           type="number"
                           value={item.quantity}
                           onChange={(e) => updateItem(index, 'quantity', parseInt(e.target.value) || 1)}
-                          placeholder="Qté"
-                          className="rounded-xl border-gray-200"
+                          placeholder="1"
+                          className="rounded-xl border-gray-200 text-center"
                           min="1"
                         />
                       </div>
-                      <div className="col-span-3">
+                      
+                      <div className="col-span-2">
                         <Input
                           type="number"
                           value={item.price}
                           onChange={(e) => updateItem(index, 'price', parseFloat(e.target.value) || 0)}
-                          placeholder="Prix unitaire"
+                          placeholder="0.00"
                           className="rounded-xl border-gray-200"
                           step="0.01"
                         />
                       </div>
-                      <div className="col-span-1 text-sm text-gray-600 text-center">
-                        {(item.quantity * item.price).toFixed(2)}€
-                      </div>
+                      
                       <div className="col-span-1">
+                        <select
+                          value={item.tva_rate !== undefined ? item.tva_rate : 20}
+                          onChange={(e) => updateItem(index, 'tva_rate', parseFloat(e.target.value))}
+                          className="w-full px-2 py-2 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none text-sm bg-white"
+                        >
+                          <option value={20}>20%</option>
+                          <option value={10}>10%</option>
+                          <option value={5.5}>5,5%</option>
+                          <option value={0}>0%</option>
+                          <option value={-1}>Exo</option>
+                        </select>
+                      </div>
+                      
+                      <div className="col-span-2 text-center">
+                        <span className="text-sm font-semibold text-gray-900">
+                          {(item.quantity * item.price).toFixed(2)}€
+                        </span>
+                      </div>
+                      
+                      <div className="col-span-1 text-center">
                         {formData.items.length > 1 && (
                           <Button
                             type="button"
@@ -8259,10 +12242,45 @@ const QuoteCreate = () => {
                   ))}
                 </div>
                 
-                <div className="mt-4 p-4 bg-purple-50 rounded-xl">
-                  <div className="flex justify-between items-center">
-                    <span className="font-medium text-gray-900">Total HT:</span>
-                    <span className="text-xl font-bold text-purple-600">{calculateTotal().toFixed(2)}€</span>
+                {/* Récapitulatif avec TVA détaillée par taux */}
+                <div className="mt-6 space-y-3">
+                  <div className="p-5 bg-gradient-to-br from-gray-50 to-gray-100 rounded-2xl border-2 border-gray-200">
+                    <div className="flex justify-between items-center mb-3">
+                      <span className="text-sm font-medium text-gray-600">Total HT</span>
+                      <span className="text-lg font-semibold text-gray-900">{calculateTotals().totalHT}€</span>
+                    </div>
+                    
+                    {/* Afficher chaque taux de TVA utilisé */}
+                    {calculateTotals().tvaByRate.length > 0 && (
+                      <div className="mb-3 pb-3 border-b border-gray-300 space-y-2">
+                        {calculateTotals().tvaByRate.map((tva) => (
+                          <div key={tva.rate} className="flex justify-between items-center">
+                            <span className="text-sm font-medium text-gray-600">
+                              {tva.rate === -1 ? '🚫 TVA Exonérée' : `TVA ${tva.rate}%`}
+                            </span>
+                            <span className="text-sm font-semibold text-gray-900">{tva.amount}€</span>
+                          </div>
+                        ))}
+                        <div className="flex justify-between items-center pt-2 border-t border-gray-200">
+                          <span className="text-sm font-semibold text-gray-700">Total TVA</span>
+                          <span className="text-lg font-bold text-gray-900">{calculateTotals().totalTVA}€</span>
+                        </div>
+                      </div>
+                    )}
+                    
+                    {calculateTotals().tvaByRate.length === 0 && (
+                      <div className="flex justify-between items-center mb-3 pb-3 border-b border-gray-300">
+                        <span className="text-sm font-medium text-amber-600">🚫 TVA non applicable</span>
+                        <span className="text-lg font-semibold text-amber-600">0.00€</span>
+                      </div>
+                    )}
+                    
+                    <div className="flex justify-between items-center pt-2">
+                      <span className="text-base font-bold text-gray-900">Total TTC</span>
+                      <span className="text-2xl font-bold bg-gradient-to-r from-purple-600 to-indigo-600 bg-clip-text text-transparent">
+                        {calculateTotals().totalTTC}€
+                      </span>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -8291,13 +12309,348 @@ const QuoteCreate = () => {
                     setShowForm(false);
                     setIsEditMode(false);
                     setEditingQuote(null);
+                    setQuotePhotos([]);
+                    setUploadingPhoto(false);
                     setFormData({
                       client_id: '',
                       title: '',
                       description: '',
                       amount: '',
                       status: 'DRAFT',
-                      items: [{ name: '', quantity: 1, price: 0, total: 0 }]
+                      tva_rate: 20,
+                      items: [{ name: '', description: '', quantity: 1, price: 0, total: 0, tva_rate: 20 }]
+                    });
+                  }}
+                  variant="outline"
+                  className="rounded-2xl px-6"
+                >
+                  Annuler
+                </Button>
+              </div>
+            </form>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Modal Catalogue */}
+      {showCatalogModal && (
+        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+          <Card className="bg-white rounded-3xl shadow-2xl max-w-3xl w-full max-h-[80vh] overflow-hidden">
+            <CardHeader className="pb-4 border-b">
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle className="text-2xl font-semibold text-gray-900">Catalogue Produits</CardTitle>
+                  <p className="text-sm text-gray-500 mt-1">Sélectionnez des articles à ajouter au devis</p>
+                </div>
+                <Button
+                  onClick={() => {
+                    setShowCatalogModal(false);
+                    setCatalogSearchTerm('');
+                  }}
+                  variant="ghost"
+                  size="sm"
+                  className="rounded-full"
+                >
+                  <X className="h-5 w-5" />
+                </Button>
+              </div>
+              
+              {/* Barre de recherche */}
+              <div className="mt-4">
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-gray-400" />
+                  <input
+                    type="text"
+                    placeholder="Rechercher un article..."
+                    value={catalogSearchTerm}
+                    onChange={(e) => setCatalogSearchTerm(e.target.value)}
+                    className="w-full pl-10 pr-4 py-2 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none transition-colors"
+                  />
+                </div>
+              </div>
+            </CardHeader>
+            
+            <CardContent className="p-6 overflow-y-auto max-h-[60vh]">
+              <div className="space-y-3">
+                {catalogProducts
+                  .filter(product => 
+                    product.name.toLowerCase().includes(catalogSearchTerm.toLowerCase())
+                  )
+                  .map((product) => (
+                    <div
+                      key={product.id}
+                      className="flex items-center justify-between p-4 bg-gradient-to-r from-indigo-50 to-purple-50 rounded-xl hover:shadow-md transition-all cursor-pointer border-2 border-transparent hover:border-indigo-200"
+                      onClick={() => {
+                        // Ajouter l'article au devis
+                        const newItem = {
+                          name: product.name,
+                          quantity: 1,
+                          price: product.price,
+                          total: product.price,
+                          tva_rate: formData.tva_rate
+                        };
+                        setFormData(prev => ({
+                          ...prev,
+                          items: [...prev.items, newItem]
+                        }));
+                        setShowCatalogModal(false);
+                        setCatalogSearchTerm('');
+                      }}
+                    >
+                      <div className="flex-1">
+                        <h4 className="font-semibold text-gray-900">{product.name}</h4>
+                        <p className="text-sm text-gray-500 mt-1">Unité: {product.unit}</p>
+                      </div>
+                      <div className="flex items-center gap-4">
+                        <span className="text-lg font-bold text-indigo-600">{product.price}€</span>
+                        <Button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const newItem = {
+                              name: product.name,
+                              quantity: 1,
+                              price: product.price,
+                              total: product.price,
+                              tva_rate: formData.tva_rate
+                            };
+                            setFormData(prev => ({
+                              ...prev,
+                              items: [...prev.items, newItem]
+                            }));
+                            setShowCatalogModal(false);
+                            setCatalogSearchTerm('');
+                          }}
+                          size="sm"
+                          className="bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl"
+                        >
+                          <Plus className="h-4 w-4 mr-1" />
+                          Ajouter
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                
+                {catalogProducts.filter(p => 
+                  p.name.toLowerCase().includes(catalogSearchTerm.toLowerCase())
+                ).length === 0 && (
+                  <div className="text-center py-12">
+                    <FileBarChart className="h-12 w-12 text-gray-300 mx-auto mb-3" />
+                    <p className="text-gray-500">Aucun article trouvé</p>
+                  </div>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* Create/Edit Worksite Form */}
+      {showWorksiteForm && (
+        <Card className="bg-white/80 backdrop-blur-xl rounded-3xl border-0 shadow-2xl">
+          <CardHeader className="pb-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <CardTitle className="text-xl font-semibold text-gray-900">
+                  {editingWorksite ? 'Modifier le chantier' : 'Créer un nouveau chantier'}
+                </CardTitle>
+                <p className="text-sm text-gray-500 mt-1">
+                  Renseignez les informations du chantier
+                </p>
+              </div>
+              <Button
+                onClick={() => {
+                  setShowWorksiteForm(false);
+                  setEditingWorksite(null);
+                  setWorksiteFormData({
+                    title: '',
+                    description: '',
+                    address: '',
+                    client_id: '',
+                    status: 'PLANNED',
+                    progress: 0,
+                    start_date: '',
+                    end_date: '',
+                    budget: '',
+                    team_size: 1,
+                    notes: ''
+                  });
+                }}
+                variant="outline"
+                className="rounded-xl"
+              >
+                <X className="h-4 w-4" />
+              </Button>
+            </div>
+          </CardHeader>
+          <CardContent>
+            <form onSubmit={saveWorksite} className="space-y-6">
+              {/* Informations principales */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Titre du chantier *</label>
+                  <input
+                    type="text"
+                    required
+                    value={worksiteFormData.title}
+                    onChange={(e) => setWorksiteFormData({...worksiteFormData, title: e.target.value})}
+                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-gray-400 focus:outline-none transition-colors"
+                    placeholder="Ex: Rénovation immeuble..."
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Client</label>
+                  <select
+                    value={worksiteFormData.client_id}
+                    onChange={(e) => setWorksiteFormData({...worksiteFormData, client_id: e.target.value})}
+                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-gray-400 focus:outline-none transition-colors"
+                  >
+                    <option value="">Sélectionner un client</option>
+                    {clients.map(client => (
+                      <option key={client.id} value={client.id}>{client.nom}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Description</label>
+                <textarea
+                  value={worksiteFormData.description}
+                  onChange={(e) => setWorksiteFormData({...worksiteFormData, description: e.target.value})}
+                  rows="3"
+                  className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-gray-400 focus:outline-none transition-colors"
+                  placeholder="Description détaillée du chantier..."
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Adresse</label>
+                <input
+                  type="text"
+                  value={worksiteFormData.address}
+                  onChange={(e) => setWorksiteFormData({...worksiteFormData, address: e.target.value})}
+                  className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-gray-400 focus:outline-none transition-colors"
+                  placeholder="Adresse complète du chantier"
+                />
+              </div>
+
+              {/* Statut et avancement */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Statut</label>
+                  <select
+                    value={worksiteFormData.status}
+                    onChange={(e) => setWorksiteFormData({...worksiteFormData, status: e.target.value})}
+                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-gray-400 focus:outline-none transition-colors"
+                  >
+                    <option value="PLANNED">📋 Planifié</option>
+                    <option value="IN_PROGRESS">🔧 En cours</option>
+                    <option value="ON_HOLD">⏸️ En pause</option>
+                    <option value="COMPLETED">✅ Terminé</option>
+                    <option value="CANCELLED">❌ Annulé</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Avancement (%)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    max="100"
+                    value={worksiteFormData.progress}
+                    readOnly
+                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl bg-gray-100 cursor-not-allowed"
+                    title="L'avancement est calculé automatiquement en fonction des jours de planning"
+                  />
+                  <p className="text-xs text-gray-500 mt-1">📊 Calculé automatiquement à partir des jours de planning</p>
+                </div>
+              </div>
+
+              {/* Dates */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Date de début</label>
+                  <input
+                    type="date"
+                    value={worksiteFormData.start_date}
+                    onChange={(e) => setWorksiteFormData({...worksiteFormData, start_date: e.target.value})}
+                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-gray-400 focus:outline-none transition-colors"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Date de fin prévue</label>
+                  <input
+                    type="date"
+                    value={worksiteFormData.end_date}
+                    onChange={(e) => setWorksiteFormData({...worksiteFormData, end_date: e.target.value})}
+                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-gray-400 focus:outline-none transition-colors"
+                  />
+                </div>
+              </div>
+
+              {/* Budget et équipe */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Budget (€)</label>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    value={worksiteFormData.budget}
+                    onChange={(e) => setWorksiteFormData({...worksiteFormData, budget: e.target.value})}
+                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-gray-400 focus:outline-none transition-colors"
+                    placeholder="0.00"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Taille de l'équipe</label>
+                  <input
+                    type="number"
+                    min="1"
+                    value={worksiteFormData.team_size}
+                    onChange={(e) => setWorksiteFormData({...worksiteFormData, team_size: parseInt(e.target.value) || 1})}
+                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-gray-400 focus:outline-none transition-colors"
+                  />
+                </div>
+              </div>
+
+              {/* Notes */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Notes internes</label>
+                <textarea
+                  value={worksiteFormData.notes}
+                  onChange={(e) => setWorksiteFormData({...worksiteFormData, notes: e.target.value})}
+                  rows="3"
+                  className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-gray-400 focus:outline-none transition-colors"
+                  placeholder="Notes pour l'équipe..."
+                />
+              </div>
+
+              {/* Boutons d'action */}
+              <div className="flex gap-3 pt-4">
+                <Button
+                  type="submit"
+                  className="flex-1 bg-black hover:bg-gray-800 text-white rounded-2xl py-3 shadow-lg"
+                >
+                  <Check className="h-4 w-4 mr-2" />
+                  {editingWorksite ? 'Enregistrer les modifications' : 'Créer le chantier'}
+                </Button>
+                <Button
+                  type="button"
+                  onClick={() => {
+                    setShowWorksiteForm(false);
+                    setEditingWorksite(null);
+                    setWorksiteFormData({
+                      title: '',
+                      description: '',
+                      address: '',
+                      client_id: '',
+                      status: 'PLANNED',
+                      progress: 0,
+                      start_date: '',
+                      end_date: '',
+                      budget: '',
+                      team_size: 1,
+                      notes: ''
                     });
                   }}
                   variant="outline"
@@ -8349,48 +12702,81 @@ const QuoteCreate = () => {
                          q.quote_number?.toLowerCase().includes(search) ||
                          q.amount?.toString().includes(search);
                 }).map((quote) => (
-                  <div key={quote.id} className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100 hover:shadow-md transition-all duration-200 cursor-pointer">
-                    <div className="flex items-start justify-between mb-2">
-                      <h4 className="font-semibold text-gray-900 text-sm">{quote.title}</h4>
-                      {quote.quote_number && (
-                        <span className="px-2 py-1 bg-gradient-to-r from-purple-100 to-blue-100 text-purple-700 text-xs font-mono font-bold rounded-lg">
-                          #{quote.quote_number}
-                        </span>
+                  <div key={quote.id} className="bg-white rounded-2xl p-5 shadow-sm hover:shadow-xl border border-gray-100 hover:border-gray-200 transition-all duration-300 cursor-pointer">
+                    {/* Header avec numéro */}
+                    <div className="flex items-start justify-between mb-3">
+                      <div>
+                        {quote.quote_number && (
+                          <span className="text-xs font-mono text-gray-400 block mb-2">
+                            {quote.quote_number}
+                          </span>
+                        )}
+                        <h4 className="font-semibold text-gray-900 text-base leading-tight">{quote.title || 'Devis sans titre'}</h4>
+                      </div>
+                    </div>
+                    
+                    {/* Client et description */}
+                    <div className="space-y-2 mb-4">
+                      {quote.client_name && (
+                        <div className="flex items-center text-sm text-gray-600">
+                          <div className="w-1.5 h-1.5 bg-gray-400 rounded-full mr-2"></div>
+                          <span>{quote.client_name}</span>
+                        </div>
+                      )}
+                      {quote.description && (
+                        <p className="text-xs text-gray-500 line-clamp-2 pl-3.5">{quote.description}</p>
                       )}
                     </div>
-                    {quote.client_name && (
-                      <p className="text-xs text-teal-600 mb-1">👤 {quote.client_name}</p>
-                    )}
-                    <p className="text-xs text-gray-600 mb-3 line-clamp-2">{quote.description}</p>
-                    <div className="flex items-center justify-between mb-3">
-                      <span className="text-sm font-bold text-purple-600">{quote.amount}€</span>
-                      <span className="text-xs text-gray-500">{new Date(quote.created_at).toLocaleDateString('fr-FR')}</span>
+                    
+                    {/* Montant */}
+                    <div className="bg-gradient-to-br from-gray-50 to-gray-100/50 rounded-xl p-4 mb-4">
+                      <div className="flex items-end justify-between">
+                        <div>
+                          <span className="text-xs text-gray-500 uppercase tracking-wider font-medium block mb-1">Montant</span>
+                          <span className="text-2xl font-bold text-gray-900">{calculateQuoteTTC(quote)}€</span>
+                          <span className="text-xs text-gray-500 ml-1.5">TTC</span>
+                        </div>
+                        <span className="text-xs text-gray-400 font-medium">
+                          {new Date(quote.created_at).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}
+                        </span>
+                      </div>
                     </div>
-                    <div className="flex space-x-2">
+                    
+                    {/* Actions */}
+                    <div className="flex gap-2">
                       <Button 
                         size="sm" 
-                        onClick={() => acceptQuote(quote.id)}
-                        className="bg-green-600 hover:bg-green-700 text-white rounded-lg text-xs px-3 py-1 h-7"
+                        onClick={() => sendQuote(quote.id)}
+                        className="flex-1 bg-gray-900 hover:bg-black text-white rounded-xl h-9 font-medium shadow-sm hover:shadow-md transition-all"
                       >
-                        <Check className="h-3 w-3 mr-1" />
-                        Valider
+                        <Check className="h-4 w-4 mr-1.5" />
+                        Envoyer
                       </Button>
                       <Button 
                         size="sm" 
                         onClick={() => editQuote(quote)}
                         variant="outline"
-                        className="rounded-lg text-xs px-3 py-1 h-7 border-gray-200"
+                        className="flex-1 rounded-xl border-gray-200 hover:border-gray-300 hover:bg-gray-50 h-9 font-medium"
                       >
-                        <Edit className="h-3 w-3 mr-1" />
+                        <Edit className="h-4 w-4 mr-1.5" />
                         Éditer
+                      </Button>
+                      <Button 
+                        size="sm" 
+                        onClick={() => downloadQuotePDF(quote.id)}
+                        variant="outline"
+                        className="rounded-xl border-gray-200 hover:border-green-300 hover:bg-green-50 h-9 w-9 flex items-center justify-center p-0 group"
+                        title="Télécharger le PDF"
+                      >
+                        <Download className="h-5 w-5 text-gray-400 group-hover:text-green-500 transition-colors" />
                       </Button>
                       <Button 
                         size="sm" 
                         onClick={() => deleteQuote(quote.id)}
                         variant="outline"
-                        className="rounded-lg text-xs px-3 py-1 h-7 border-red-200 text-red-600 hover:bg-red-50"
+                        className="rounded-xl border-gray-200 hover:border-red-300 hover:bg-red-50 h-9 w-9 flex items-center justify-center p-0 group"
                       >
-                        <Trash2 className="h-3 w-3" />
+                        <Trash2 className="h-5 w-5 text-gray-400 group-hover:text-red-500 transition-colors" />
                       </Button>
                     </div>
                   </div>
@@ -8436,58 +12822,86 @@ const QuoteCreate = () => {
                          q.quote_number?.toLowerCase().includes(search) ||
                          q.amount?.toString().includes(search);
                 }).map((quote) => (
-                  <div key={quote.id} className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100 hover:shadow-md transition-all duration-200 cursor-pointer">
-                    <div className="flex items-start justify-between mb-2">
-                      <h4 className="font-semibold text-gray-900 text-sm">{quote.title}</h4>
-                      {quote.quote_number && (
-                        <span className="px-2 py-1 bg-gradient-to-r from-blue-100 to-cyan-100 text-blue-700 text-xs font-mono font-bold rounded-lg">
-                          #{quote.quote_number}
-                        </span>
+                  <div key={quote.id} className="bg-white rounded-2xl p-5 shadow-sm hover:shadow-xl border border-gray-100 hover:border-gray-200 transition-all duration-300 cursor-pointer">
+                    {/* Header avec numéro */}
+                    <div className="flex items-start justify-between mb-3">
+                      <div>
+                        {quote.quote_number && (
+                          <span className="text-xs font-mono text-gray-400 block mb-2">
+                            {quote.quote_number}
+                          </span>
+                        )}
+                        <h4 className="font-semibold text-gray-900 text-base leading-tight">{quote.title || 'Devis sans titre'}</h4>
+                      </div>
+                    </div>
+                    
+                    {/* Client et description */}
+                    <div className="space-y-2 mb-4">
+                      {quote.client_name && (
+                        <div className="flex items-center text-sm text-gray-600">
+                          <div className="w-1.5 h-1.5 bg-gray-400 rounded-full mr-2"></div>
+                          <span>{quote.client_name}</span>
+                        </div>
+                      )}
+                      {quote.description && (
+                        <p className="text-xs text-gray-500 line-clamp-2 pl-3.5">{quote.description}</p>
                       )}
                     </div>
-                    {quote.client_name && (
-                      <p className="text-xs text-teal-600 mb-1">👤 {quote.client_name}</p>
-                    )}
-                    <p className="text-xs text-gray-600 mb-3 line-clamp-2">{quote.description}</p>
-                    <div className="flex items-center justify-between mb-3">
-                      <span className="text-sm font-bold text-purple-600">{quote.amount}€</span>
-                      <span className="text-xs text-gray-500">{new Date(quote.created_at).toLocaleDateString('fr-FR')}</span>
+                    
+                    {/* Montant */}
+                    <div className="bg-gradient-to-br from-gray-50 to-gray-100/50 rounded-xl p-4 mb-4">
+                      <div className="flex items-end justify-between">
+                        <div>
+                          <span className="text-xs text-gray-500 uppercase tracking-wider font-medium block mb-1">Montant</span>
+                          <span className="text-2xl font-bold text-gray-900">{calculateQuoteTTC(quote)}€</span>
+                          <span className="text-xs text-gray-500 ml-1.5">TTC</span>
+                        </div>
+                        <span className="text-xs text-gray-400 font-medium">
+                          {new Date(quote.created_at).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })}
+                        </span>
+                      </div>
                     </div>
-                    <div className="flex space-x-2 mb-2">
+                    
+                    {/* Actions principales */}
+                    <div className="flex gap-2 mb-2">
+                      <Button 
+                        size="sm" 
+                        onClick={() => downloadQuotePDF(quote.id)}
+                        variant="outline"
+                        className="rounded-xl border-gray-200 hover:border-green-300 hover:bg-green-50 h-9 w-9 flex items-center justify-center p-0 group"
+                        title="Télécharger le PDF"
+                      >
+                        <Download className="h-5 w-5 text-gray-400 group-hover:text-green-500 transition-colors" />
+                      </Button>
                       <Button 
                         size="sm" 
                         onClick={() => acceptQuote(quote.id)}
-                        className="bg-green-600 hover:bg-green-700 text-white rounded-lg text-xs px-3 py-1 h-7"
+                        className="flex-1 bg-gray-900 hover:bg-black text-white rounded-xl h-9 font-medium shadow-sm hover:shadow-md transition-all"
                       >
-                        <Check className="h-3 w-3 mr-1" />
+                        <Check className="h-4 w-4 mr-1.5" />
                         Accepter
                       </Button>
                       <Button 
                         size="sm" 
                         onClick={() => rejectQuote(quote.id)}
                         variant="outline"
-                        className="rounded-lg text-xs px-3 py-1 h-7 border-red-200 text-red-600 hover:bg-red-50"
+                        className="flex-1 rounded-xl border-gray-200 hover:border-gray-300 hover:bg-gray-50 h-9 font-medium"
                       >
-                        <X className="h-3 w-3 mr-1" />
+                        <X className="h-4 w-4 mr-1.5" />
                         Refuser
                       </Button>
                     </div>
-                    <div className="flex space-x-2">
-                      <Button 
-                        size="sm" 
-                        onClick={() => editQuote(quote)}
-                        variant="outline"
-                        className="rounded-lg text-xs px-2 py-1 h-7 border-gray-200"
-                      >
-                        <Edit className="h-3 w-3" />
-                      </Button>
+                    
+                    {/* Actions secondaires */}
+                    <div className="flex gap-2">
                       <Button 
                         size="sm" 
                         onClick={() => deleteQuote(quote.id)}
                         variant="outline"
-                        className="rounded-lg text-xs px-2 py-1 h-7 border-red-200 text-red-600 hover:bg-red-50"
+                        className="flex-1 rounded-xl border-gray-200 hover:border-red-300 hover:bg-red-50 h-9 font-medium text-sm group"
                       >
-                        <Trash2 className="h-3 w-3" />
+                        <Trash2 className="h-4 w-4 mr-1.5 group-hover:text-red-500 transition-colors" />
+                        Supprimer
                       </Button>
                     </div>
                   </div>
@@ -8501,104 +12915,7 @@ const QuoteCreate = () => {
               </div>
             </div>
 
-            {/* Colonne 3: Acceptés */}
-            <div className="bg-white/80 backdrop-blur-xl rounded-3xl border-0 shadow-lg">
-              <div 
-                className="p-4 border-b border-gray-100 cursor-pointer hover:bg-gray-50 transition-colors"
-                onClick={() => setExpandedColumn(expandedColumn === 'ACCEPTED' ? null : 'ACCEPTED')}
-              >
-                <div className="flex items-center justify-between">
-                  <h3 className="font-semibold text-gray-900 flex items-center">
-                    <div className="w-3 h-3 bg-green-400 rounded-full mr-2"></div>
-                    Acceptés
-                    {expandedColumn === 'ACCEPTED' ? (
-                      <ChevronUp className="h-4 w-4 ml-2 text-gray-400" />
-                    ) : (
-                      <ChevronDown className="h-4 w-4 ml-2 text-gray-400" />
-                    )}
-                  </h3>
-                  <span className="text-sm text-gray-500 bg-gray-100 px-2 py-1 rounded-full">
-                    {quotes.filter(q => q.status === 'ACCEPTED').length}
-                  </span>
-                </div>
-              </div>
-              <div className="p-4 space-y-3 max-h-96 overflow-y-auto">
-                {quotes.filter(q => {
-                  if (q.status !== 'ACCEPTED') return false;
-                  if (!searchTerm) return true;
-                  const search = searchTerm.toLowerCase();
-                  return q.title.toLowerCase().includes(search) ||
-                         q.description?.toLowerCase().includes(search) ||
-                         q.client_name?.toLowerCase().includes(search) ||
-                         q.quote_number?.toLowerCase().includes(search) ||
-                         q.amount?.toString().includes(search);
-                }).map((quote) => (
-                  <div key={quote.id} className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100 hover:shadow-md transition-all duration-200 cursor-pointer">
-                    <div className="flex items-start justify-between mb-2">
-                      <h4 className="font-semibold text-gray-900 text-sm">{quote.title}</h4>
-                      {quote.quote_number && (
-                        <span className="px-2 py-1 bg-gradient-to-r from-green-100 to-emerald-100 text-green-700 text-xs font-mono font-bold rounded-lg">
-                          #{quote.quote_number}
-                        </span>
-                      )}
-                    </div>
-                    {quote.client_name && (
-                      <p className="text-xs text-teal-600 mb-1">👤 {quote.client_name}</p>
-                    )}
-                    <p className="text-xs text-gray-600 mb-3 line-clamp-2">{quote.description}</p>
-                    <div className="flex items-center justify-between mb-3">
-                      <span className="text-sm font-bold text-green-600">{quote.amount}€</span>
-                      <span className="text-xs text-gray-500">{new Date(quote.created_at).toLocaleDateString('fr-FR')}</span>
-                    </div>
-                    <div className="flex space-x-2 mb-2">
-                      <Button 
-                        size="sm" 
-                        onClick={() => alert(`🏗️ Conversion en chantier à venir`)}
-                        className="bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs px-3 py-1 h-7"
-                      >
-                        <ArrowRight className="h-3 w-3 mr-1" />
-                        Chantier
-                      </Button>
-                      <Button 
-                        size="sm" 
-                        onClick={() => alert(`📄 Génération PDF à venir`)}
-                        variant="outline"
-                        className="rounded-lg text-xs px-3 py-1 h-7 border-gray-200"
-                      >
-                        <FileText className="h-3 w-3 mr-1" />
-                        PDF
-                      </Button>
-                    </div>
-                    <div className="flex space-x-2">
-                      <Button 
-                        size="sm" 
-                        onClick={() => editQuote(quote)}
-                        variant="outline"
-                        className="rounded-lg text-xs px-2 py-1 h-7 border-gray-200"
-                      >
-                        <Edit className="h-3 w-3" />
-                      </Button>
-                      <Button 
-                        size="sm" 
-                        onClick={() => deleteQuote(quote.id)}
-                        variant="outline"
-                        className="rounded-lg text-xs px-2 py-1 h-7 border-red-200 text-red-600 hover:bg-red-50"
-                      >
-                        <Trash2 className="h-3 w-3" />
-                      </Button>
-                    </div>
-                  </div>
-                ))}
-                {quotes.filter(q => q.status === 'ACCEPTED').length === 0 && (
-                  <div className="text-center py-8">
-                    <CheckCircle className="h-12 w-12 mx-auto mb-2 text-gray-300" />
-                    <p className="text-sm text-gray-500">Aucun devis accepté</p>
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Colonne 4: Convertis en Chantiers */}
+            {/* Colonne 3: Convertis en Chantiers */}
             <div className="bg-white/80 backdrop-blur-xl rounded-3xl border-0 shadow-lg">
               <div 
                 className="p-4 border-b border-gray-100 cursor-pointer hover:bg-gray-50 transition-colors"
@@ -8615,51 +12932,188 @@ const QuoteCreate = () => {
                     )}
                   </h3>
                   <span className="text-sm text-gray-500 bg-gray-100 px-2 py-1 rounded-full">
-                    {quotes.filter(q => q.status === 'CONVERTED_TO_WORKSITE').length}
+                    {worksites.length}
                   </span>
                 </div>
               </div>
               <div className="p-4 space-y-3 max-h-96 overflow-y-auto">
-                {quotes.filter(q => q.status === 'CONVERTED_TO_WORKSITE').map((quote) => (
-                  <div key={quote.id} className="bg-white rounded-2xl p-4 shadow-sm border border-gray-100 hover:shadow-md transition-all duration-200 cursor-pointer">
-                    <div className="flex items-start justify-between mb-2">
-                      <h4 className="font-semibold text-gray-900 text-sm">{quote.title}</h4>
-                      {quote.quote_number && (
-                        <span className="px-2 py-1 bg-gradient-to-r from-purple-100 to-indigo-100 text-purple-700 text-xs font-mono font-bold rounded-lg">
-                          #{quote.quote_number}
+                {worksites.map((worksite) => (
+                  <div key={worksite.id} className="bg-white border-2 border-purple-200 rounded-xl p-5 hover:shadow-lg transition-all relative">
+                    <div className="flex items-start justify-between mb-3">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs font-medium bg-purple-100 text-purple-700 px-2 py-1 rounded-full">
+                          🏗️ Chantier
                         </span>
+                        {hasSchedule(worksite.id) && (
+                          <span className="text-xs font-medium bg-green-100 text-green-700 px-2 py-1 rounded-full">
+                            ✓ Planifié
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    
+                    {worksite.client_name && (
+                      <div className="mb-3 p-2 bg-purple-50 rounded-lg">
+                        <p className="text-sm font-semibold text-purple-900">
+                          👤 {worksite.client_name}
+                        </p>
+                      </div>
+                    )}
+                    
+                    <h4 className="font-bold text-gray-900 mb-2">{worksite.title}</h4>
+                    <p className="text-sm text-gray-600 mb-3 line-clamp-2">{worksite.description}</p>
+                    
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <span className="text-lg font-bold text-gray-900">{worksite.amount || 0}€</span>
+                        <Button 
+                          size="sm"
+                          onClick={() => openPlanningModal(worksite)}
+                          className={`${hasSchedule(worksite.id) ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'} text-white rounded-lg text-xs px-3 py-1.5 h-8 flex-1 font-medium`}
+                        >
+                          📅 {hasSchedule(worksite.id) ? 'Planifié' : 'Planifier'}
+                        </Button>
+                        <Button 
+                          size="sm"
+                          onClick={() => deleteWorksite(worksite.id)}
+                          className="bg-gray-200 hover:bg-gray-300 text-gray-700 rounded-lg text-xs px-3 py-1.5 h-8"
+                          title="Supprimer le chantier"
+                        >
+                          🗑️
+                        </Button>
+                      </div>
+                      {worksite.quote_id && (
+                        <Button 
+                          size="sm"
+                          onClick={async () => {
+                            try {
+                              const token = localStorage.getItem('token');
+                              const quoteRes = await axios.get(`${API}/quotes/${worksite.quote_id}`, {
+                                headers: { Authorization: `Bearer ${token}` }
+                              });
+                              setSelectedWorksiteQuote({ ...worksite, quote: quoteRes.data });
+                            } catch (error) {
+                              console.error('Erreur chargement devis:', error);
+                              alert('Erreur lors du chargement du devis');
+                            }
+                          }}
+                          className="w-full bg-gray-100 hover:bg-gray-200 text-gray-900 border border-gray-300 rounded-lg text-xs px-3 py-1.5 h-8 font-medium"
+                        >
+                          📄 Voir le Devis
+                        </Button>
                       )}
                     </div>
-                    <p className="text-xs text-gray-600 mb-3 line-clamp-2">{quote.description}</p>
-                    <div className="flex items-center justify-between mb-3">
-                      <span className="text-sm font-bold text-purple-600">{quote.amount}€</span>
-                      <span className="text-xs text-gray-500">{new Date(quote.created_at).toLocaleDateString('fr-FR')}</span>
+                  </div>
+                ))}
+                {worksites.length === 0 && (
+                  <div className="text-center py-8">
+                    <Building className="h-12 w-12 mx-auto mb-2 text-gray-300" />
+                    <p className="text-sm text-gray-500">Aucun chantier</p>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Colonne 4: Facturés */}
+            <div className="bg-white/80 backdrop-blur-xl rounded-3xl border-0 shadow-lg">
+              <div 
+                className="p-4 border-b border-gray-100 cursor-pointer hover:bg-gray-50 transition-colors"
+                onClick={() => setExpandedColumn(expandedColumn === 'INVOICED' ? null : 'INVOICED')}
+              >
+                <div className="flex items-center justify-between">
+                  <h3 className="font-semibold text-gray-900 flex items-center">
+                    <div className="w-3 h-3 bg-emerald-400 rounded-full mr-2"></div>
+                    Facturés
+                    {expandedColumn === 'INVOICED' ? (
+                      <ChevronUp className="h-4 w-4 ml-2 text-gray-400" />
+                    ) : (
+                      <ChevronDown className="h-4 w-4 ml-2 text-gray-400" />
+                    )}
+                  </h3>
+                  <span className="text-sm text-gray-500 bg-gray-100 px-2 py-1 rounded-full">
+                    {worksites.filter(w => hasSchedule(w.id)).length}
+                  </span>
+                </div>
+              </div>
+              <div className="p-4 space-y-3 max-h-96 overflow-y-auto">
+                {worksites.filter(w => hasSchedule(w.id)).map((worksite) => (
+                  <div key={worksite.id} className="bg-white border-2 border-emerald-200 rounded-xl p-5 hover:shadow-lg transition-all relative">
+                    <div className="flex items-start justify-between mb-3">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span className="text-xs font-medium bg-emerald-100 text-emerald-700 px-2 py-1 rounded-full">
+                          💰 Facturé
+                        </span>
+                        {worksite.invoice_id ? (
+                          <button
+                            onClick={() => navigate('/bureau/facturation')}
+                            className="text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full font-medium hover:bg-green-200 transition-colors flex items-center gap-1"
+                            title="Facture électronique envoyée"
+                          >
+                            ✓ Envoyée
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => navigate('/bureau/facturation')}
+                            className="text-xs bg-orange-100 text-orange-700 px-2 py-1 rounded-full font-medium hover:bg-orange-200 transition-colors flex items-center gap-1"
+                            title="Créer facture électronique"
+                          >
+                            ✗ Créer
+                          </button>
+                        )}
+                      </div>
                     </div>
-                    <div className="flex space-x-2">
+                    
+                    {worksite.client_name && (
+                      <div className="mb-3 p-2 bg-emerald-50 rounded-lg">
+                        <p className="text-sm font-semibold text-emerald-900">
+                          👤 {worksite.client_name}
+                        </p>
+                      </div>
+                    )}
+                    
+                    <h4 className="font-bold text-gray-900 mb-2">{worksite.title}</h4>
+                    <p className="text-sm text-gray-600 mb-3 line-clamp-2">{worksite.description}</p>
+                    
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="text-lg font-bold text-gray-900">{worksite.amount || 0}€</span>
+                      </div>
+                      {worksite.quote_id && (
+                        <Button 
+                          size="sm"
+                          onClick={async () => {
+                            try {
+                              const token = localStorage.getItem('token');
+                              const quoteRes = await axios.get(`${API}/quotes/${worksite.quote_id}`, {
+                                headers: { Authorization: `Bearer ${token}` }
+                              });
+                              setSelectedWorksiteQuote({ ...worksite, quote: quoteRes.data });
+                            } catch (error) {
+                              console.error('Erreur chargement devis:', error);
+                              alert('Erreur lors du chargement du devis');
+                            }
+                          }}
+                          className="w-full bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-xs px-3 py-1 h-7"
+                        >
+                          📄 Voir le Devis
+                        </Button>
+                      )}
                       <Button 
-                        size="sm" 
-                        onClick={() => alert(`🏗️ DÉTAILS CHANTIER\n\nRéférence: CHT-${quote.id.substring(0,6).toUpperCase()}\nOrigine: ${quote.title}\n\n📊 STATUT CHANTIER:\n• Budget: ${quote.amount}€\n• Avancement: 34%\n• Équipe: 3 techniciens\n• Démarrage: ${new Date(quote.created_at).toLocaleDateString('fr-FR')}\n• Fin prévue: Dans 12 jours\n\n📍 LOCALISATION:\n• Adresse: 123 Rue Example\n• Zone: Centre-ville\n\n⚡ ACTIONS DISPONIBLES:\n• Modifier planning\n• Ajouter ressources\n• Mettre à jour avancement`)}
-                        className="bg-gray-600 hover:bg-gray-700 text-white rounded-lg text-xs px-3 py-1 h-7"
+                        size="sm"
+                        onClick={() => {
+                          alert(`Facture pour: ${worksite.title}\nMontant: ${worksite.amount}€\n\nFonctionnalité à implémenter`);
+                        }}
+                        className="w-full bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs px-3 py-1 h-7"
                       >
-                        <Building className="h-3 w-3 mr-1" />
-                        Voir Chantier
-                      </Button>
-                      <Button 
-                        size="sm" 
-                        onClick={() => alert(`📊 STATISTIQUES CHANTIER\n\nChantier: ${quote.title}\nBudget: ${quote.amount}€\n\n📈 PERFORMANCE:\n• Avancement: 34%\n• Respect du budget: 96%\n• Respect des délais: 89%\n• Heures travaillées: 127h/180h\n• Coût réel: ${Math.round(parseFloat(quote.amount) * 0.78)}€\n\n👥 ÉQUIPE:\n• Main d'œuvre: 3 personnes\n• Productivité: +12%\n• Taux de présence: 94%\n\n🎯 INDICATEURS CLÉS:\n• Satisfaction client: 4.8/5\n• Rentabilité: +18%\n• Délai restant: 12 jours`)}
-                        variant="outline"
-                        className="rounded-lg text-xs px-3 py-1 h-7 border-gray-200"
-                      >
-                        <BarChart3 className="h-3 w-3 mr-1" />
-                        Stats
+                        🧾 Voir la Facture
                       </Button>
                     </div>
                   </div>
                 ))}
-                {quotes.filter(q => q.status === 'CONVERTED_TO_WORKSITE').length === 0 && (
+                {worksites.filter(w => hasSchedule(w.id)).length === 0 && (
                   <div className="text-center py-8">
-                    <Building className="h-12 w-12 mx-auto mb-2 text-gray-300" />
-                    <p className="text-sm text-gray-500">Aucun chantier</p>
+                    <DollarSign className="h-12 w-12 mx-auto mb-2 text-gray-300" />
+                    <p className="text-sm text-gray-500">Aucun chantier facturé</p>
                   </div>
                 )}
               </div>
@@ -8674,17 +13128,20 @@ const QuoteCreate = () => {
                   <h3 className="text-3xl font-bold text-gray-900">
                     {expandedColumn === 'DRAFT' && '📝 Détails Brouillons'}
                     {expandedColumn === 'SENT' && '📧 Détails Envoyés'}
-                    {expandedColumn === 'ACCEPTED' && '✅ Détails Acceptés'}
                     {expandedColumn === 'WORKSITE' && '🏗️ Détails Chantiers'}
+                    {expandedColumn === 'INVOICED' && '💰 Détails Facturés'}
                   </h3>
                   <p className="text-sm text-gray-500 mt-1">
-                    {quotes.filter(q => {
-                      if (expandedColumn === 'DRAFT') return q.status === 'DRAFT';
-                      if (expandedColumn === 'SENT') return q.status === 'SENT' || q.status === 'PENDING';
-                      if (expandedColumn === 'ACCEPTED') return q.status === 'ACCEPTED';
-                      if (expandedColumn === 'WORKSITE') return q.status === 'CONVERTED_TO_WORKSITE';
-                      return false;
-                    }).length} devis • Cliquez sur un statut pour le modifier directement
+                    {expandedColumn === 'INVOICED' ? 
+                      `${worksites.filter(w => hasSchedule(w.id)).length} chantiers facturés` :
+                      expandedColumn === 'WORKSITE' ?
+                      `${worksites.length} chantiers` :
+                      `${quotes.filter(q => {
+                        if (expandedColumn === 'DRAFT') return q.status === 'DRAFT';
+                        if (expandedColumn === 'SENT') return q.status === 'SENT' || q.status === 'PENDING';
+                        return false;
+                      }).length} devis • Cliquez sur un statut pour le modifier directement`
+                    }
                   </p>
                 </div>
                 <Button
@@ -8697,30 +13154,198 @@ const QuoteCreate = () => {
                 </Button>
               </div>
 
-              {/* Liste détaillée des devis de la colonne sélectionnée */}
+              {/* Liste détaillée des devis ou chantiers de la colonne sélectionnée */}
               <div className="space-y-6">
-                {quotes.filter(q => {
-                  if (expandedColumn === 'DRAFT') return q.status === 'DRAFT';
-                  if (expandedColumn === 'SENT') return q.status === 'SENT' || q.status === 'PENDING';
-                  if (expandedColumn === 'ACCEPTED') return q.status === 'ACCEPTED';
-                  if (expandedColumn === 'WORKSITE') return q.status === 'CONVERTED_TO_WORKSITE';
-                  return false;
-                }).map((quote) => (
-                  <div key={quote.id} className="bg-white rounded-2xl p-6 border-2 border-gray-100 hover:border-purple-300 hover:shadow-xl transition-all duration-200">
+                {expandedColumn === 'INVOICED' ? (
+                  // Affichage des chantiers facturés (avec planning)
+                  worksites.filter(w => hasSchedule(w.id)).map((worksite) => (
+                    <div key={worksite.id} className="bg-white rounded-2xl p-6 border-2 border-emerald-100 hover:border-emerald-300 hover:shadow-xl transition-all duration-200">
+                      <div className="flex items-start justify-between mb-4 pb-4 border-b border-gray-100">
+                        <div className="flex-1">
+                          <div className="flex items-center justify-between mb-2">
+                            <h4 className="text-xl font-bold text-gray-900">{worksite.title || 'Chantier sans titre'}</h4>
+                            <span className="px-3 py-2 bg-emerald-500 text-white text-sm font-bold rounded-xl shadow-lg">
+                              💰 FACTURÉ
+                            </span>
+                          </div>
+                          <div className="flex items-center space-x-3">
+                            {worksite.client_name && (
+                              <div className="flex items-center text-sm font-medium text-gray-700 bg-gray-100 px-3 py-1 rounded-lg">
+                                <Users className="h-4 w-4 mr-1.5" />
+                                {worksite.client_name}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <div className="space-y-4">
+                          <div className="bg-gradient-to-br from-emerald-100 to-emerald-200 rounded-xl p-4">
+                            <div className="text-xs font-semibold text-emerald-700 mb-1">MONTANT</div>
+                            <div className="text-3xl font-bold text-emerald-900">{worksite.amount?.toFixed(2) || '0.00'}€</div>
+                          </div>
+                        </div>
+                        <div className="space-y-4">
+                          {worksite.description && (
+                            <div>
+                              <div className="text-xs font-semibold text-gray-500 mb-2">DESCRIPTION</div>
+                              <p className="text-sm text-gray-700 leading-relaxed">{worksite.description}</p>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  ))
+                ) : expandedColumn === 'WORKSITE' ? (
+                  // Affichage des chantiers avec filtrage par statut
+                  <>
+                    {/* Onglets de filtrage par statut */}
+                    <div className="flex flex-wrap gap-2 mb-6 p-1 bg-gray-100 rounded-2xl">
+                      {[
+                        { key: 'ALL', label: 'Tous', icon: '📋', count: worksites.length },
+                        { key: 'PLANNED', label: 'Planifiés', icon: '📅', count: worksites.filter(w => w.status === 'PLANNED').length },
+                        { key: 'IN_PROGRESS', label: 'En cours', icon: '🔧', count: worksites.filter(w => w.status === 'IN_PROGRESS').length },
+                        { key: 'COMPLETED', label: 'Terminés', icon: '✅', count: worksites.filter(w => w.status === 'COMPLETED').length },
+                      ].map(tab => (
+                        <button
+                          key={tab.key}
+                          onClick={() => setWorksiteStatusFilter(tab.key)}
+                          className={`flex-1 min-w-[120px] px-4 py-3 rounded-xl text-sm font-semibold transition-all duration-200 ${
+                            worksiteStatusFilter === tab.key
+                              ? 'bg-white text-gray-900 shadow-lg'
+                              : 'text-gray-500 hover:text-gray-700 hover:bg-white/50'
+                          }`}
+                        >
+                          <span className="mr-1">{tab.icon}</span> {tab.label}
+                          <span className={`ml-2 px-2 py-0.5 rounded-full text-xs font-bold ${
+                            worksiteStatusFilter === tab.key
+                              ? 'bg-purple-100 text-purple-700'
+                              : 'bg-gray-200 text-gray-500'
+                          }`}>{tab.count}</span>
+                        </button>
+                      ))}
+                    </div>
+
+                    {/* Liste filtrée des chantiers */}
+                    <div className="space-y-6">
+                    {worksites.filter(w => worksiteStatusFilter === 'ALL' || w.status === worksiteStatusFilter).length === 0 ? (
+                      <div className="text-center py-12">
+                        <Building className="h-16 w-16 mx-auto mb-4 text-gray-300" />
+                        <h4 className="text-lg font-semibold text-gray-900 mb-2">Aucun chantier dans cette catégorie</h4>
+                        <p className="text-gray-500 text-sm">Changez de filtre pour voir d'autres chantiers</p>
+                      </div>
+                    ) : (
+                    worksites.filter(w => worksiteStatusFilter === 'ALL' || w.status === worksiteStatusFilter).map((worksite) => (
+                    <div key={worksite.id} className="bg-white rounded-2xl p-6 border-2 border-purple-100 hover:border-purple-300 hover:shadow-xl transition-all duration-200">
+                      <div className="flex items-start justify-between mb-4 pb-4 border-b border-gray-100">
+                        <div className="flex-1">
+                          <div className="flex items-center justify-between mb-2">
+                            <h4 className="text-xl font-bold text-gray-900">{worksite.title || 'Chantier sans titre'}</h4>
+                            <span className={`px-3 py-2 text-white text-sm font-bold rounded-xl shadow-lg ${
+                              worksite.status === 'COMPLETED' ? 'bg-green-500' :
+                              worksite.status === 'IN_PROGRESS' ? 'bg-blue-500' :
+                              worksite.status === 'PENDING' ? 'bg-orange-500' : 'bg-gray-500'
+                            }`}>
+                              🏗️ {worksite.status === 'COMPLETED' ? 'TERMINÉ' : 
+                                   worksite.status === 'IN_PROGRESS' ? 'EN COURS' :
+                                   worksite.status === 'PENDING' ? 'EN ATTENTE' : worksite.status}
+                            </span>
+                          </div>
+                          <div className="flex items-center space-x-3">
+                            {worksite.client_name && (
+                              <div className="flex items-center text-sm font-medium text-gray-700 bg-gray-100 px-3 py-1 rounded-lg">
+                                <Users className="h-4 w-4 mr-1.5" />
+                                {worksite.client_name}
+                              </div>
+                            )}
+                            {worksite.address && (
+                              <div className="flex items-center text-sm text-gray-600">
+                                <MapPin className="h-4 w-4 mr-1" />
+                                {worksite.address}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                        <div className="space-y-4">
+                          {worksite.start_date && (
+                            <div className="bg-gradient-to-br from-purple-100 to-purple-200 rounded-xl p-4">
+                              <div className="text-xs font-semibold text-purple-700 mb-1">DATES</div>
+                              <div className="text-sm font-bold text-purple-900">
+                                Début: {new Date(worksite.start_date).toLocaleDateString('fr-FR')}
+                                {worksite.end_date && (
+                                  <div className="mt-1">Fin: {new Date(worksite.end_date).toLocaleDateString('fr-FR')}</div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                        <div className="space-y-4">
+                          {worksite.description && (
+                            <div>
+                              <div className="text-xs font-semibold text-gray-500 mb-2">DESCRIPTION</div>
+                              <p className="text-sm text-gray-700 leading-relaxed">{worksite.description}</p>
+                            </div>
+                          )}
+                          {hasSchedule(worksite.id) && (
+                            <div className="flex items-center text-sm font-medium text-emerald-700 bg-emerald-50 px-3 py-2 rounded-lg">
+                              <Calendar className="h-4 w-4 mr-2" />
+                              Planning créé
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      {/* Bouton voir le devis */}
+                      {worksite.quote_id && (
+                        <div className="mt-4 pt-4 border-t border-gray-100">
+                          <Button
+                            onClick={async () => {
+                              try {
+                                const token = localStorage.getItem('token');
+                                const quoteRes = await axios.get(`${API}/quotes/${worksite.quote_id}`, {
+                                  headers: { Authorization: `Bearer ${token}` }
+                                });
+                                setSelectedWorksiteQuote({ ...worksite, quote: quoteRes.data });
+                              } catch (error) {
+                                console.error('Erreur chargement devis:', error);
+                                alert('Erreur lors du chargement du devis');
+                              }
+                            }}
+                            className="w-full bg-gradient-to-r from-purple-500 to-blue-500 hover:from-purple-600 hover:to-blue-600 text-white rounded-xl"
+                          >
+                            <FileText className="h-4 w-4 mr-2" />
+                            Voir le devis détaillé
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  )))}
+                    </div>
+                  </>
+                ) : (
+                  // Affichage des devis normaux
+                  quotes.filter(q => {
+                    if (expandedColumn === 'DRAFT') return q.status === 'DRAFT';
+                    if (expandedColumn === 'SENT') return q.status === 'SENT' || q.status === 'PENDING';
+                    if (expandedColumn === 'WORKSITE') return q.status === 'CONVERTED_TO_WORKSITE';
+                    return false;
+                  }).map((quote) => (
+                  <div key={quote.id} className="bg-white rounded-2xl p-6 border-2 border-gray-100 hover:border-gray-300 hover:shadow-xl transition-all duration-200">
                     {/* Header avec titre et statut */}
                     <div className="flex items-start justify-between mb-4 pb-4 border-b border-gray-100">
                       <div className="flex-1">
                         <div className="flex items-center justify-between mb-2">
                           <h4 className="text-xl font-bold text-gray-900">{quote.title || 'Devis sans titre'}</h4>
                           {quote.quote_number && (
-                            <span className="px-3 py-2 bg-gradient-to-r from-purple-500 to-blue-500 text-white text-sm font-mono font-bold rounded-xl shadow-lg">
+                            <span className="px-3 py-2 bg-black text-white text-sm font-mono font-bold rounded-xl shadow-lg">
                               #{quote.quote_number}
                             </span>
                           )}
                         </div>
                         <div className="flex items-center space-x-3">
                           {quote.client_name && (
-                            <div className="flex items-center text-sm font-medium text-teal-700 bg-teal-50 px-3 py-1 rounded-lg">
+                            <div className="flex items-center text-sm font-medium text-gray-700 bg-gray-100 px-3 py-1 rounded-lg">
                               <Users className="h-4 w-4 mr-1.5" />
                               {quote.client_name}
                             </div>
@@ -8756,19 +13381,16 @@ const QuoteCreate = () => {
                               alert('Erreur lors du changement de statut');
                             }
                           }}
-                          className="text-sm font-medium px-4 py-2 rounded-xl border-2 focus:border-purple-500 focus:ring-2 focus:ring-purple-500/20 transition-all cursor-pointer"
+                          className="text-sm font-medium px-4 py-2 rounded-xl border-2 focus:border-gray-400 focus:ring-2 focus:ring-gray-400/20 transition-all cursor-pointer"
                           style={{
                             backgroundColor: quote.status === 'DRAFT' ? '#fef3c7' : 
-                                           quote.status === 'SENT' ? '#dbeafe' : 
-                                           quote.status === 'ACCEPTED' ? '#d1fae5' : '#fce7f3',
+                                           quote.status === 'SENT' ? '#dbeafe' : '#fce7f3',
                             color: quote.status === 'DRAFT' ? '#92400e' : 
-                                  quote.status === 'SENT' ? '#1e40af' : 
-                                  quote.status === 'ACCEPTED' ? '#065f46' : '#9f1239'
+                                  quote.status === 'SENT' ? '#1e40af' : '#9f1239'
                           }}
                         >
                           <option value="DRAFT">📋 Brouillon</option>
                           <option value="SENT">✉️ Envoyé</option>
-                          <option value="ACCEPTED">✅ Accepté</option>
                           <option value="REJECTED">❌ Refusé</option>
                         </select>
                       </div>
@@ -8777,20 +13399,20 @@ const QuoteCreate = () => {
                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                       {/* Colonne 1: Informations client et montant */}
                       <div className="space-y-4">
-                        <div className="bg-gradient-to-br from-purple-50 to-purple-100 rounded-xl p-4">
-                          <div className="text-xs font-semibold text-purple-600 mb-1">MONTANT TOTAL</div>
-                          <div className="text-3xl font-bold text-purple-700">{quote.amount?.toFixed(2) || '0.00'}€</div>
+                        <div className="bg-gradient-to-br from-gray-100 to-gray-200 rounded-xl p-4">
+                          <div className="text-xs font-semibold text-gray-600 mb-1">MONTANT TOTAL TTC</div>
+                          <div className="text-3xl font-bold text-black">{calculateQuoteTTC(quote)}€</div>
                         </div>
                         
                         {quote.client_email && (
                           <div className="flex items-center text-sm text-gray-700 bg-gray-50 rounded-lg p-3">
-                            <Mail className="h-4 w-4 mr-2 text-blue-500" />
+                            <Mail className="h-4 w-4 mr-2 text-gray-500" />
                             <span className="truncate">{quote.client_email}</span>
                           </div>
                         )}
                         {quote.client_phone && (
                           <div className="flex items-center text-sm text-gray-700 bg-gray-50 rounded-lg p-3">
-                            <Phone className="h-4 w-4 mr-2 text-green-500" />
+                            <Phone className="h-4 w-4 mr-2 text-gray-500" />
                             {quote.client_phone}
                           </div>
                         )}
@@ -8810,7 +13432,7 @@ const QuoteCreate = () => {
                             <div className="text-xs font-semibold text-gray-500 mb-2">ARTICLES / PRESTATIONS</div>
                             <div className="space-y-2">
                               {quote.items.map((item, idx) => (
-                                <div key={idx} className="bg-blue-50 rounded-lg p-3 text-sm">
+                                <div key={idx} className="bg-gray-50 rounded-lg p-3 text-sm">
                                   <div className="flex items-start justify-between">
                                     <div className="flex-1">
                                       <div className="font-medium text-gray-900">{item.name || 'Article sans nom'}</div>
@@ -8818,7 +13440,7 @@ const QuoteCreate = () => {
                                         Qté: {item.quantity} × {item.price?.toFixed(2)}€
                                       </div>
                                     </div>
-                                    <div className="font-bold text-blue-700 ml-2">
+                                    <div className="font-bold text-black ml-2">
                                       {((item.quantity || 0) * (item.price || 0)).toFixed(2)}€
                                     </div>
                                   </div>
@@ -8831,26 +13453,30 @@ const QuoteCreate = () => {
 
                       {/* Colonne 3: Actions */}
                       <div className="flex flex-col space-y-1.5">
-                        <Button
-                          onClick={() => editQuote(quote)}
-                          className="bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800 text-white rounded-lg shadow-md px-3 py-1.5 text-sm"
-                          size="sm"
-                        >
-                          <Edit className="h-3.5 w-3.5 mr-1.5" />
-                          Modifier
-                        </Button>
-                        <Button
-                          onClick={() => sendQuote(quote)}
-                          className="bg-gradient-to-r from-green-600 to-green-700 hover:from-green-700 hover:to-green-800 text-white rounded-lg shadow-md px-3 py-1.5 text-sm"
-                          size="sm"
-                        >
-                          <Mail className="h-3.5 w-3.5 mr-1.5" />
-                          Envoyer
-                        </Button>
+                        {quote.status === 'DRAFT' && (
+                          <>
+                            <Button
+                              onClick={() => editQuote(quote)}
+                              className="bg-black hover:bg-gray-800 text-white rounded-lg shadow-md px-3 py-1.5 text-sm"
+                              size="sm"
+                            >
+                              <Edit className="h-3.5 w-3.5 mr-1.5" />
+                              Modifier
+                            </Button>
+                            <Button
+                              onClick={() => sendQuote(quote)}
+                              className="bg-black hover:bg-gray-800 text-white rounded-lg shadow-md px-3 py-1.5 text-sm"
+                              size="sm"
+                            >
+                              <Mail className="h-3.5 w-3.5 mr-1.5" />
+                              Envoyer
+                            </Button>
+                          </>
+                        )}
                         <Button
                           onClick={() => alert(`Générer PDF pour ${quote.title}`)}
                           variant="outline"
-                          className="rounded-lg border-2 border-indigo-200 text-indigo-700 hover:bg-indigo-50 px-3 py-1.5 text-sm"
+                          className="rounded-lg border-2 border-gray-300 text-gray-700 hover:bg-gray-100 px-3 py-1.5 text-sm"
                           size="sm"
                         >
                           <FileText className="h-3.5 w-3.5 mr-1.5" />
@@ -8859,30 +13485,41 @@ const QuoteCreate = () => {
                         <Button
                           onClick={() => deleteQuote(quote.id)}
                           variant="outline"
-                          className="rounded-lg border-2 border-red-200 text-red-600 hover:bg-red-50 px-3 py-1.5 text-sm"
+                          className="rounded-lg border-2 border-gray-300 text-gray-600 hover:bg-gray-100 px-3 py-1.5 text-sm"
                           size="sm"
                         >
-                          <Trash2 className="h-3.5 w-3.5 mr-1.5" />
+                          <Trash2 className="h-3.5 w-3.5 mr-1.5 text-red-500" />
                           Supprimer
                         </Button>
                       </div>
                     </div>
                   </div>
-                ))}
+                  ))
+                )}
 
-                {quotes.filter(q => {
-                  if (expandedColumn === 'DRAFT') return q.status === 'DRAFT';
-                  if (expandedColumn === 'SENT') return q.status === 'SENT' || q.status === 'PENDING';
-                  if (expandedColumn === 'ACCEPTED') return q.status === 'ACCEPTED';
-                  if (expandedColumn === 'WORKSITE') return q.status === 'CONVERTED_TO_WORKSITE';
-                  return false;
-                }).length === 0 && (
-                  <div className="text-center py-12">
-                    <div className="text-gray-400 mb-4">
-                      <FileText className="h-16 w-16 mx-auto" />
+                {expandedColumn === 'INVOICED' ? (
+                  worksites.filter(w => hasSchedule(w.id)).length === 0 && (
+                    <div className="text-center py-12">
+                      <div className="text-gray-400 mb-4">
+                        <DollarSign className="h-16 w-16 mx-auto" />
+                      </div>
+                      <p className="text-gray-500">Aucun chantier facturé</p>
                     </div>
-                    <p className="text-gray-500">Aucun devis dans cette catégorie</p>
-                  </div>
+                  )
+                ) : (
+                  quotes.filter(q => {
+                    if (expandedColumn === 'DRAFT') return q.status === 'DRAFT';
+                    if (expandedColumn === 'SENT') return q.status === 'SENT' || q.status === 'PENDING';
+                    if (expandedColumn === 'WORKSITE') return q.status === 'CONVERTED_TO_WORKSITE';
+                    return false;
+                  }).length === 0 && (
+                    <div className="text-center py-12">
+                      <div className="text-gray-400 mb-4">
+                        <FileText className="h-16 w-16 mx-auto" />
+                      </div>
+                      <p className="text-gray-500">Aucun devis dans cette catégorie</p>
+                    </div>
+                  )
                 )}
               </div>
             </div>
@@ -8932,51 +13569,316 @@ const QuoteCreate = () => {
         </div>
       )}
 
+      {/* Modale pour afficher le devis d'un chantier */}
+      {selectedWorksiteQuote && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
+          <div className="bg-white rounded-2xl max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="sticky top-0 bg-white border-b border-gray-200 p-6 flex justify-between items-center">
+              <div>
+                <h2 className="text-2xl font-bold text-gray-900">Devis du Chantier</h2>
+                <p className="text-sm text-gray-600 mt-1">{selectedWorksiteQuote.title}</p>
+              </div>
+              <button
+                onClick={() => setSelectedWorksiteQuote(null)}
+                className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+              >
+                <X className="w-6 h-6 text-gray-500" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-6">
+              {/* Informations client */}
+              {selectedWorksiteQuote.client_name && (
+                <div className="bg-gray-50 rounded-xl p-4">
+                  <h3 className="font-semibold text-gray-900 mb-3">Client</h3>
+                  <div className="flex items-center gap-2 text-gray-700">
+                    <Users className="w-4 h-4" />
+                    <span>{selectedWorksiteQuote.client_name}</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Informations créateur du devis */}
+              {selectedWorksiteQuote.quote?.created_by && (
+                <div className="bg-blue-50 rounded-xl p-4">
+                  <h3 className="font-semibold text-gray-900 mb-3">Créé par</h3>
+                  <div className="flex items-center gap-2 text-gray-700">
+                    <Users className="w-4 h-4" />
+                    <span>
+                      {selectedWorksiteQuote.quote.created_by.first_name} {selectedWorksiteQuote.quote.created_by.last_name}
+                      {selectedWorksiteQuote.quote.created_by.email && (
+                        <span className="text-sm text-gray-500 ml-2">({selectedWorksiteQuote.quote.created_by.email})</span>
+                      )}
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Articles du devis */}
+              {selectedWorksiteQuote.quote && selectedWorksiteQuote.quote.items && (
+                <div>
+                  <h3 className="font-semibold text-gray-900 mb-4">Articles / Prestations</h3>
+                  <div className="space-y-3">
+                    {selectedWorksiteQuote.quote.items.map((item, index) => (
+                      <div key={index} className="bg-white border border-gray-200 rounded-lg p-4">
+                        <div className="flex justify-between items-start">
+                          <div className="flex-1">
+                            <h4 className="font-medium text-gray-900">{item.name}</h4>
+                            {item.description && (
+                              <p className="text-sm text-gray-600 mt-1">{item.description}</p>
+                            )}
+                            <div className="mt-2 grid grid-cols-3 gap-4 text-sm text-gray-600">
+                              <div>
+                                <span className="font-medium">Quantité:</span> {item.quantity}
+                              </div>
+                              <div>
+                                <span className="font-medium">Prix unitaire:</span> {item.price?.toFixed(2)}€
+                              </div>
+                              <div>
+                                <span className="font-medium">Total:</span> {((item.quantity || 0) * (item.price || 0)).toFixed(2)}€
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Montant total */}
+              {selectedWorksiteQuote.quote && (
+                <div className="bg-gradient-to-r from-purple-50 to-blue-50 rounded-xl p-6">
+                  <div className="flex justify-between items-center">
+                    <span className="text-lg font-semibold text-gray-900">Montant Total</span>
+                    <span className="text-3xl font-bold text-gray-900">
+                      {selectedWorksiteQuote.quote.amount?.toFixed(2)}€
+                    </span>
+                  </div>
+                </div>
+              )}
+
+              {/* Notes */}
+              {selectedWorksiteQuote.quote?.description && (
+                <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                  <h4 className="font-semibold text-gray-900 mb-2 flex items-center gap-2">
+                    <AlertCircle className="w-5 h-5 text-yellow-600" />
+                    Description / Notes
+                  </h4>
+                  <p className="text-gray-700 text-sm whitespace-pre-wrap">{selectedWorksiteQuote.quote.description}</p>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Worksites List */}
       {activeTab === 'worksites' && (
-        <div className="grid gap-4">
+        <div className="space-y-6">
+          {/* Header avec statistiques */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+            <div className="bg-white rounded-2xl p-4 shadow-md">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-xs text-gray-500 uppercase mb-1">Total Chantiers</p>
+                  <p className="text-2xl font-bold text-black">{worksites.length}</p>
+                </div>
+                <Building className="h-8 w-8 text-gray-400" />
+              </div>
+            </div>
+            <div className="bg-white rounded-2xl p-4 shadow-md">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-xs text-gray-500 uppercase mb-1">En Cours</p>
+                  <p className="text-2xl font-bold text-black">{worksites.filter(w => w.status === 'IN_PROGRESS').length}</p>
+                </div>
+                <Clock className="h-8 w-8 text-gray-400" />
+              </div>
+            </div>
+            <div className="bg-white rounded-2xl p-4 shadow-md">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-xs text-gray-500 uppercase mb-1">Terminés</p>
+                  <p className="text-2xl font-bold text-black">{worksites.filter(w => w.status === 'COMPLETED').length}</p>
+                </div>
+                <CheckCircle className="h-8 w-8 text-gray-400" />
+              </div>
+            </div>
+            <div className="bg-white rounded-2xl p-4 shadow-md">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-xs text-gray-500 uppercase mb-1">Budget Total</p>
+                  <p className="text-2xl font-bold text-black">
+                    {worksites.reduce((sum, w) => sum + (w.budget || 0), 0).toLocaleString()}€
+                  </p>
+                </div>
+                <DollarSign className="h-8 w-8 text-gray-400" />
+              </div>
+            </div>
+          </div>
+
+          {/* Bouton Nouveau Chantier */}
+          <div className="flex justify-between items-center mb-4">
+            <h2 className="text-2xl font-bold text-gray-900">Mes Chantiers</h2>
+            <Button
+              onClick={() => {
+                setShowWorksiteForm(true);
+                setEditingWorksite(null);
+                setWorksiteFormData({
+                  title: '',
+                  description: '',
+                  address: '',
+                  client_id: '',
+                  status: 'PLANNED',
+                  progress: 0,
+                  start_date: '',
+                  end_date: '',
+                  budget: '',
+                  team_size: 1,
+                  notes: ''
+                });
+              }}
+              className="bg-black hover:bg-gray-800 text-white rounded-xl px-6 py-3"
+            >
+              <Plus className="h-4 w-4 mr-2" />
+              Nouveau Chantier
+            </Button>
+          </div>
+
+          {/* Liste des chantiers */}
           {worksites.length === 0 ? (
             <Card className="bg-white/80 backdrop-blur-xl rounded-3xl border-0 shadow-2xl">
               <CardContent className="p-12 text-center">
-                <Briefcase className="h-16 w-16 mx-auto mb-4 text-gray-300" />
+                <Building className="h-16 w-16 mx-auto mb-4 text-gray-300" />
                 <h3 className="text-xl font-semibold text-gray-900 mb-2">Aucun chantier</h3>
-                <p className="text-gray-500">Les devis acceptés apparaîtront ici en tant que chantiers.</p>
+                <p className="text-gray-500">Créez votre premier chantier ou convertissez un devis accepté.</p>
               </CardContent>
             </Card>
           ) : (
-            worksites.map((worksite) => (
-              <Card key={worksite.id} className="bg-white/80 backdrop-blur-xl rounded-3xl border-0 shadow-lg hover:shadow-xl transition-all duration-300">
-                <CardContent className="p-6">
-                  <div className="flex items-start justify-between">
-                    <div className="flex-1">
-                      <div className="flex items-center space-x-2 mb-2">
-                        <h3 className="text-lg font-semibold text-gray-900">{worksite.title}</h3>
-                        <Badge className="bg-blue-100 text-blue-700 text-xs">
-                          {worksite.source === 'QUOTE' ? 'Issu de devis' : 'Manuel'}
-                        </Badge>
-                      </div>
-                      <p className="text-gray-600 mb-3">Client: {worksite.client_name}</p>
-                      <div className="flex items-center space-x-4 text-sm text-gray-500">
-                        <span>Status: <strong>{worksite.status}</strong></span>
-                        <span>Créé le: {new Date(worksite.created_at).toLocaleDateString('fr-FR')}</span>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              {worksites.map((worksite) => (
+                <Card key={worksite.id} className="bg-white rounded-2xl border-2 border-gray-100 hover:border-gray-300 hover:shadow-xl transition-all duration-200">
+                  <CardContent className="p-6">
+                    {/* Header */}
+                    <div className="flex items-start justify-between mb-4">
+                      <div className="flex-1">
+                        <div className="flex items-center space-x-2 mb-2">
+                          <h3 className="text-lg font-bold text-gray-900">{worksite.title}</h3>
+                          <span className={`px-2 py-1 rounded-lg text-xs font-semibold ${
+                            worksite.status === 'PLANNED' ? 'bg-gray-100 text-gray-700' :
+                            worksite.status === 'IN_PROGRESS' ? 'bg-gray-200 text-black' :
+                            worksite.status === 'ON_HOLD' ? 'bg-gray-100 text-gray-600' :
+                            worksite.status === 'COMPLETED' ? 'bg-black text-white' : 'bg-gray-50 text-gray-500'
+                          }`}>
+                            {worksite.status === 'PLANNED' ? '📋 Planifié' :
+                             worksite.status === 'IN_PROGRESS' ? '🔧 En cours' :
+                             worksite.status === 'ON_HOLD' ? '⏸️ En pause' :
+                             worksite.status === 'COMPLETED' ? '✅ Terminé' : worksite.status}
+                          </span>
+                        </div>
+                        {worksite.clients?.name && (
+                          <p className="text-sm text-gray-600 flex items-center mb-2">
+                            <Users className="h-4 w-4 mr-1" />
+                            {worksite.clients.name}
+                          </p>
+                        )}
+                        {worksite.address && (
+                          <p className="text-sm text-gray-600 flex items-center mb-3">
+                            <MapPin className="h-4 w-4 mr-1" />
+                            {worksite.address}
+                          </p>
+                        )}
                       </div>
                     </div>
-                    <div className="flex flex-col space-y-2">
-                      <Button size="sm" variant="outline" className="rounded-xl">
-                        <Edit className="h-4 w-4 mr-1" />
-                        Modifier
-                      </Button>
-                      {worksite.quote_pdf_url && (
-                        <Button size="sm" className="bg-blue-600 hover:bg-blue-700 text-white rounded-xl">
-                          <Download className="h-4 w-4 mr-1" />
-                          Devis PDF
-                        </Button>
+
+                    {/* Progression */}
+                    {worksite.progress !== null && worksite.progress !== undefined && (
+                      <div className="mb-4">
+                        <div className="flex justify-between text-xs text-gray-600 mb-1">
+                          <span>Avancement</span>
+                          <span className="font-semibold">{worksite.progress}%</span>
+                        </div>
+                        <div className="w-full bg-gray-200 rounded-full h-2">
+                          <div
+                            className="bg-black rounded-full h-2 transition-all duration-300"
+                            style={{ width: `${worksite.progress}%` }}
+                          ></div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Infos clés */}
+                    <div className="grid grid-cols-2 gap-3 mb-4">
+                      {worksite.budget && (
+                        <div className="bg-gray-50 rounded-lg p-3">
+                          <p className="text-xs text-gray-500 mb-1">Budget</p>
+                          <p className="text-sm font-bold text-black">{worksite.budget.toLocaleString()}€</p>
+                        </div>
+                      )}
+                      {worksite.team_size && (
+                        <div className="bg-gray-50 rounded-lg p-3">
+                          <p className="text-xs text-gray-500 mb-1">Équipe</p>
+                          <p className="text-sm font-bold text-black">{worksite.team_size} personne{worksite.team_size > 1 ? 's' : ''}</p>
+                        </div>
+                      )}
+                      {worksite.start_date && (
+                        <div className="bg-gray-50 rounded-lg p-3">
+                          <p className="text-xs text-gray-500 mb-1">Début</p>
+                          <p className="text-sm font-semibold text-gray-900">
+                            {new Date(worksite.start_date).toLocaleDateString('fr-FR')}
+                          </p>
+                        </div>
+                      )}
+                      {worksite.end_date && (
+                        <div className="bg-gray-50 rounded-lg p-3">
+                          <p className="text-xs text-gray-500 mb-1">Fin prévue</p>
+                          <p className="text-sm font-semibold text-gray-900">
+                            {new Date(worksite.end_date).toLocaleDateString('fr-FR')}
+                          </p>
+                        </div>
                       )}
                     </div>
-                  </div>
-                </CardContent>
-              </Card>
-            ))
+
+                    {/* Actions */}
+                    <div className="flex space-x-2">
+                      <Button
+                        size="sm"
+                        onClick={() => {
+                          setEditingWorksite(worksite);
+                          setWorksiteFormData({
+                            title: worksite.title || '',
+                            description: worksite.description || '',
+                            address: worksite.address || '',
+                            client_id: worksite.client_id || '',
+                            status: worksite.status || 'PLANNED',
+                            progress: worksite.progress || 0,
+                            start_date: worksite.start_date || '',
+                            end_date: worksite.end_date || '',
+                            budget: worksite.budget || '',
+                            team_size: worksite.team_size || 1,
+                            notes: worksite.notes || ''
+                          });
+                          setShowWorksiteForm(true);
+                        }}
+                        className="flex-1 bg-black hover:bg-gray-800 text-white rounded-lg"
+                      >
+                        <Edit className="h-3.5 w-3.5 mr-1" />
+                        Modifier
+                      </Button>
+                      <Button
+                        size="sm"
+                        onClick={() => deleteWorksite(worksite.id)}
+                        variant="outline"
+                        className="rounded-lg border-2 border-gray-300 text-gray-600 hover:bg-gray-100"
+                      >
+                        <Trash2 className="h-3.5 w-3.5 text-red-500" />
+                      </Button>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
           )}
         </div>
       )}
@@ -9210,23 +14112,82 @@ const QuoteCreate = () => {
                     {templateFormData.items.map((item, index) => (
                       <div key={index} className="bg-gray-50 rounded-lg p-4">
                         <div className="grid md:grid-cols-4 gap-3 items-end">
-                          <div>
+                          <div className="relative">
                             <label className="block text-xs font-medium text-gray-600 mb-1">Nom</label>
                             <Input
                               placeholder="Ex: Main d'œuvre"
                               value={item.name}
                               onChange={(e) => updateTemplateItem(index, 'name', e.target.value)}
+                              onFocus={() => item.name && setTemplateItemSuggestions(prev => ({...prev, [index]: true}))}
                               className="rounded-lg text-sm"
                             />
+                            
+                            {/* Suggestions du catalogue */}
+                            {templateItemSuggestions[index] && getFilteredTemplateProducts(index).length > 0 && (
+                              <div className="absolute z-50 w-full mt-1 bg-white border rounded-xl shadow-lg max-h-48 overflow-y-auto">
+                                {getFilteredTemplateProducts(index).map(product => (
+                                  <button
+                                    key={product.id}
+                                    type="button"
+                                    onClick={() => selectTemplateProduct(index, product)}
+                                    className="w-full text-left px-3 py-2 hover:bg-blue-50 transition-colors border-b last:border-0"
+                                  >
+                                    <div className="flex justify-between items-start">
+                                      <div>
+                                        <div className="font-medium text-gray-900 text-sm">{product.name}</div>
+                                        {product.description && (
+                                          <div className="text-xs text-gray-600 mt-0.5">{product.description}</div>
+                                        )}
+                                        <div className="text-xs text-gray-500">{product.unit}</div>
+                                      </div>
+                                      <div className="text-sm font-semibold text-blue-600">{product.price}€</div>
+                                    </div>
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                            
+                            {item.name && !getFilteredTemplateProducts(index).length && templateItemSuggestions[index] && (
+                              <p className="text-xs text-blue-600 mt-1 flex items-center">
+                                <Plus className="h-3 w-3 mr-1 inline" />
+                                Nouvel article personnalisé
+                              </p>
+                            )}
                           </div>
-                          <div>
+                          <div className="relative">
                             <label className="block text-xs font-medium text-gray-600 mb-1">Description</label>
                             <Input
                               placeholder="Description détaillée"
                               value={item.description}
                               onChange={(e) => updateTemplateItem(index, 'description', e.target.value)}
+                              onFocus={() => item.description && setTemplateDescSuggestions(prev => ({...prev, [index]: true}))}
                               className="rounded-lg text-sm"
                             />
+                            
+                            {/* Suggestions du catalogue par description */}
+                            {templateDescSuggestions[index] && getFilteredTemplateProductsByDesc(index).length > 0 && (
+                              <div className="absolute z-50 w-full mt-1 bg-white border rounded-xl shadow-lg max-h-48 overflow-y-auto">
+                                {getFilteredTemplateProductsByDesc(index).map(product => (
+                                  <button
+                                    key={product.id}
+                                    type="button"
+                                    onClick={() => selectTemplateProductByDesc(index, product)}
+                                    className="w-full text-left px-3 py-2 hover:bg-blue-50 transition-colors border-b last:border-0"
+                                  >
+                                    <div className="flex justify-between items-start">
+                                      <div>
+                                        <div className="font-medium text-gray-900 text-sm">{product.name}</div>
+                                        {product.description && (
+                                          <div className="text-xs text-gray-600 mt-0.5">{product.description}</div>
+                                        )}
+                                        <div className="text-xs text-gray-500">{product.unit}</div>
+                                      </div>
+                                      <div className="text-sm font-semibold text-blue-600">{product.price}€</div>
+                                    </div>
+                                  </button>
+                                ))}
+                              </div>
+                            )}
                           </div>
                           <div>
                             <label className="block text-xs font-medium text-gray-600 mb-1">Prix Unitaire (€)</label>
@@ -9310,6 +14271,7 @@ const QuoteCreate = () => {
           </div>
         </div>
       )}
+
     </div>
   );
 };
@@ -9976,8 +14938,8 @@ const UpcomingSites = () => {
         </Card>
       )}
 
-      {/* NEW: Two-Section Layout for Chantiers */}
-      <div className="grid lg:grid-cols-2 gap-8">
+      {/* NEW: Three-Section Layout for Chantiers */}
+      <div className="grid lg:grid-cols-3 gap-6">
         
         {/* Section 1: Chantiers Actifs */}
         <div className="space-y-4">
@@ -10173,31 +15135,93 @@ const UpcomingSites = () => {
             )}
           </div>
         </div>
-      </div>
 
-      {/* Completed and Cancelled Chantiers (Optional compact view) */}
-      {(sites.filter(s => s.status === 'COMPLETED').length > 0 || sites.filter(s => s.status === 'CANCELLED').length > 0) && (
-        <div className="mt-8">
-          <h3 className="text-lg font-semibold text-gray-900 mb-4">Historique</h3>
-          <div className="grid md:grid-cols-2 gap-4">
-            {sites.filter(s => s.status === 'COMPLETED' || s.status === 'CANCELLED').map((site) => (
-              <Card key={site.id} className="bg-gray-50 rounded-2xl border border-gray-200">
-                <CardContent className="p-4">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <h4 className="font-medium text-gray-900 text-sm">{site.title}</h4>
-                      <p className="text-xs text-gray-500 mt-1">{site.location}</p>
-                    </div>
-                    <Badge className={site.status === 'COMPLETED' ? 'bg-gray-100 text-gray-700' : 'bg-red-100 text-red-700'}>
-                      {site.status === 'COMPLETED' ? 'Terminé' : 'Annulé'}
-                    </Badge>
+        {/* Section 3: Chantiers Terminés */}
+        <div className="space-y-4">
+          <div className="flex items-center justify-between mb-6">
+            <div>
+              <h3 className="text-xl font-bold text-gray-900 flex items-center">
+                <div className="w-3 h-3 bg-gray-500 rounded-full mr-3"></div>
+                Chantiers Terminés
+              </h3>
+              <p className="text-sm text-gray-600 mt-1">Chantiers finalisés</p>
+            </div>
+            <div className="bg-gray-100 text-gray-700 px-3 py-1 rounded-full text-sm font-medium">
+              {sites.filter(s => s.status === 'COMPLETED' || s.status === 'CANCELLED').length} terminés
+            </div>
+          </div>
+          
+          <div className="space-y-4">
+            {sites.filter(s => s.status === 'COMPLETED' || s.status === 'CANCELLED').length === 0 ? (
+              <Card className="bg-white/80 backdrop-blur-xl rounded-3xl border-0 shadow-lg">
+                <CardContent className="p-8 text-center">
+                  <div className="w-12 h-12 bg-gray-100 rounded-xl flex items-center justify-center mx-auto mb-4">
+                    <CheckCircle className="h-6 w-6 text-gray-400" />
                   </div>
+                  <h4 className="text-lg font-semibold text-gray-900 mb-2">Aucun chantier terminé</h4>
+                  <p className="text-gray-500 text-sm">Les chantiers terminés apparaîtront ici</p>
                 </CardContent>
               </Card>
-            ))}
+            ) : (
+              sites.filter(s => s.status === 'COMPLETED' || s.status === 'CANCELLED').map((site) => (
+                <Card key={site.id} className="bg-white/80 backdrop-blur-xl rounded-3xl border-0 shadow-lg hover:shadow-xl transition-all duration-300">
+                  <CardContent className="p-6">
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <div className="flex items-center space-x-3 mb-2">
+                          <div className={`w-3 h-3 rounded-full ${site.status === 'COMPLETED' ? 'bg-green-500' : 'bg-red-500'}`}></div>
+                          <h4 className="text-lg font-semibold text-gray-900">{site.title}</h4>
+                          <Badge className={site.status === 'COMPLETED' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}>
+                            {site.status === 'COMPLETED' ? '✅ Terminé' : '❌ Annulé'}
+                          </Badge>
+                        </div>
+                        
+                        {site.description && (
+                          <p className="text-gray-600 mb-3 text-sm">{site.description}</p>
+                        )}
+                        
+                        <div className="space-y-2 text-xs text-gray-500">
+                          {site.location && (
+                            <div className="flex items-center">
+                              <MapPin className="h-3 w-3 mr-2" />
+                              {site.location}
+                            </div>
+                          )}
+                          <div className="flex items-center space-x-4">
+                            {site.scheduled_date && (
+                              <span className="flex items-center">
+                                <Calendar className="h-3 w-3 mr-1" />
+                                {formatDate(site.scheduled_date)}
+                              </span>
+                            )}
+                            {site.assigned_to && (
+                              <span className="flex items-center">
+                                <Users className="h-3 w-3 mr-1" />
+                                {site.assigned_to}
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                      
+                      <div className="flex flex-col space-y-2">
+                        <Button 
+                          size="sm" 
+                          onClick={() => handleFollowSite(site)}
+                          className="bg-gray-600 hover:bg-gray-700 text-white rounded-xl text-xs px-3 py-1"
+                        >
+                          <Eye className="h-3 w-3 mr-1" />
+                          Détails
+                        </Button>
+                      </div>
+                    </div>
+                  </CardContent>
+                </Card>
+              ))
+            )}
           </div>
         </div>
-      )}
+      </div>
 
       {/* NEW: Follow Site Modal */}
       {showFollowModal && selectedSite && (
@@ -10587,6 +15611,569 @@ const UpcomingSites = () => {
   );
 };
 
+// Client Details View Component
+const ClientDetailsView = ({ clientId, onBack }) => {
+  const [client, setClient] = useState(null);
+  const [searches, setSearches] = useState([]);
+  const [projects, setProjects] = useState([]);
+  const [quotes, setQuotes] = useState([]);
+  const [invoices, setInvoices] = useState([]);
+  const [activeTab, setActiveTab] = useState('overview');
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    loadClientData();
+  }, [clientId]);
+
+  const loadClientData = async () => {
+    try {
+      setLoading(true);
+      
+      // Cas spécial : recherches sans client
+      if (clientId === 'NO_CLIENT') {
+        setClient({ id: 'NO_CLIENT', nom: 'Clients occasionnels', email: '' });
+        
+        const searchesRes = await axios.get(`${API}/searches?without_client=true`, {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        }).catch(() => ({ data: [] }));
+        
+        setSearches(searchesRes.data || []);
+        setProjects([]);
+        setLoading(false);
+        return;
+      }
+      
+      const [clientRes, searchesRes, projectsRes, quotesRes, worksitesRes] = await Promise.all([
+        axios.get(`${API}/clients/${clientId}`, {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        }),
+        axios.get(`${API}/searches?client_id=${clientId}`, {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        }).catch(() => ({ data: { data: [] } })),
+        axios.get(`${API}/projects?client_id=${clientId}`, {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        }).catch(() => ({ data: { data: [] } })),
+        axios.get(`${API}/quotes?client_id=${clientId}`, {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        }).catch(() => ({ data: { data: [] } })),
+        axios.get(`${API}/worksites?client_id=${clientId}`, {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        }).catch(() => ({ data: [] }))
+      ]);
+
+      setClient(clientRes.data);
+      setSearches(searchesRes.data.data || searchesRes.data || []);
+      setProjects(projectsRes.data.data || projectsRes.data || []);
+      setQuotes(quotesRes.data.data || quotesRes.data || []);
+      setInvoices(worksitesRes.data || []);
+      
+    } catch (error) {
+      console.error('Erreur chargement client:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <Card className="bg-white/80 backdrop-blur-xl rounded-3xl border-0 shadow-2xl">
+        <CardContent className="p-12 text-center">
+          <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-teal-600 mx-auto mb-4"></div>
+          <p className="text-gray-600">Chargement des détails...</p>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  if (!client) {
+    return (
+      <Card className="bg-white/80 backdrop-blur-xl rounded-3xl border-0 shadow-2xl">
+        <CardContent className="p-12 text-center">
+          <p className="text-gray-500 mb-4">Client introuvable</p>
+          <Button onClick={onBack} variant="outline" className="rounded-xl">
+            ← Retour à la liste
+          </Button>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  const tabs = [
+    { id: 'overview', label: 'Vue d\'ensemble', count: null },
+    { id: 'searches', label: 'Recherches', count: searches.length },
+    { id: 'projects', label: 'Projets', count: projects.length },
+    { id: 'quotes', label: 'Devis', count: quotes.length },
+    { id: 'invoices', label: 'Factures', count: invoices.length },
+  ];
+
+  const recentActivity = [
+    ...searches.map(s => ({ type: 'search', date: s.created_at, title: s.title || 'Recherche sans titre', data: s })),
+    ...projects.map(p => ({ type: 'project', date: p.created_at, title: p.name, data: p })),
+  ].sort((a, b) => new Date(b.date) - new Date(a.date)).slice(0, 10);
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <Card className="bg-white/80 backdrop-blur-xl rounded-3xl border-0 shadow-2xl">
+        <CardContent className="p-8">
+          <Button 
+            onClick={onBack}
+            variant="ghost"
+            className="mb-6 text-gray-600 hover:text-gray-800"
+          >
+            <ArrowLeft className="h-4 w-4 mr-2" />
+            Retour à la liste
+          </Button>
+
+          <div className="flex items-start justify-between">
+            <div className="flex items-start gap-6">
+              <div className="w-20 h-20 bg-gradient-to-br from-teal-500 to-teal-600 rounded-2xl flex items-center justify-center text-white text-3xl font-bold shadow-lg">
+                {client.nom?.charAt(0).toUpperCase()}
+              </div>
+
+              <div>
+                <h1 className="text-3xl font-bold text-gray-900 mb-3">
+                  {clientId === 'NO_CLIENT' ? '📋 ' : ''}{client.nom}
+                </h1>
+                {clientId === 'NO_CLIENT' ? (
+                  <p className="text-gray-600 mt-2">
+                    Recherches de clients occasionnels (sans suivi client)
+                  </p>
+                ) : (
+                  <>
+                    <div className="space-y-2 text-gray-600">
+                      {client.email && (
+                        <div className="flex items-center gap-2">
+                          <Mail className="h-4 w-4" />
+                          <a href={`mailto:${client.email}`} className="hover:text-teal-600">
+                            {client.email}
+                          </a>
+                        </div>
+                      )}
+                      {client.telephone && (
+                        <div className="flex items-center gap-2">
+                          <Phone className="h-4 w-4" />
+                          <a href={`tel:${client.telephone}`} className="hover:text-teal-600">
+                            {client.telephone}
+                          </a>
+                        </div>
+                      )}
+                      {client.adresse && (
+                        <div className="flex items-center gap-2">
+                          <MapPin className="h-4 w-4" />
+                          <span>{client.adresse}</span>
+                        </div>
+                      )}
+                    </div>
+                    <p className="text-sm text-gray-400 mt-3">
+                      Client depuis le {new Date(client.created_at).toLocaleDateString('fr-FR')}
+                    </p>
+                  </>
+                )}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="bg-blue-50 rounded-xl p-4 text-center">
+                <div className="text-2xl font-bold text-blue-600">{searches.length}</div>
+                <div className="text-sm text-gray-600">Recherches</div>
+              </div>
+              <div className="bg-green-50 rounded-xl p-4 text-center">
+                <div className="text-2xl font-bold text-green-600">{projects.length}</div>
+                <div className="text-sm text-gray-600">Projets</div>
+              </div>
+              <div className="bg-purple-50 rounded-xl p-4 text-center">
+                <div className="text-2xl font-bold text-purple-600">{quotes.length}</div>
+                <div className="text-sm text-gray-600">Devis</div>
+              </div>
+              <div className="bg-orange-50 rounded-xl p-4 text-center">
+                <div className="text-2xl font-bold text-orange-600">{invoices.length}</div>
+                <div className="text-sm text-gray-600">Factures</div>
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Tabs */}
+      <Card className="bg-white/80 backdrop-blur-xl rounded-3xl border-0 shadow-2xl">
+        <div className="flex border-b overflow-x-auto">
+          {tabs.map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`px-8 py-4 font-medium whitespace-nowrap transition ${
+                activeTab === tab.id
+                  ? 'border-b-2 border-teal-600 text-teal-600'
+                  : 'text-gray-600 hover:text-gray-800'
+              }`}
+            >
+              {tab.label}
+              {tab.count !== null && tab.count !== undefined && (
+                <span className="ml-2 px-2 py-1 bg-gray-100 rounded-full text-xs font-semibold">
+                  {tab.count}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+
+        <CardContent className="p-8">
+          {/* Vue d'ensemble */}
+          {activeTab === 'overview' && (
+            <div className="space-y-6">
+              <div>
+                <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
+                  <Clock className="h-5 w-5" />
+                  Activité récente
+                </h3>
+                
+                {recentActivity.length === 0 ? (
+                  <div className="text-center py-12 bg-gray-50 rounded-2xl">
+                    <p className="text-gray-500">Aucune activité pour ce client</p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    {recentActivity.map((activity, index) => (
+                      <div key={index} className="flex items-start gap-4 p-4 bg-gray-50 rounded-xl hover:bg-gray-100 transition">
+                        {activity.type === 'search' ? (
+                          <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center flex-shrink-0">
+                            <Search className="h-5 w-5 text-blue-600" />
+                          </div>
+                        ) : (
+                          <div className="w-10 h-10 bg-green-100 rounded-lg flex items-center justify-center flex-shrink-0">
+                            <FolderOpen className="h-5 w-5 text-green-600" />
+                          </div>
+                        )}
+                        
+                        <div className="flex-1">
+                          <div className="font-medium text-gray-800">{activity.title}</div>
+                          <div className="text-sm text-gray-500">
+                            {activity.type === 'search' ? '🔍 Recherche' : '📊 Projet'} • 
+                            {' '}{new Date(activity.date).toLocaleDateString('fr-FR', {
+                              day: 'numeric',
+                              month: 'long',
+                              year: 'numeric'
+                            })}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Statistiques */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div className="bg-gradient-to-br from-blue-50 to-blue-100 rounded-2xl p-6">
+                  <h4 className="font-semibold mb-4 flex items-center gap-2">
+                    <Search className="h-5 w-5" />
+                    Recherches par type
+                  </h4>
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm">🏞️ Terrain</span>
+                      <span className="font-bold text-blue-600">
+                        {searches.filter(s => s.search_type === 'TERRAIN').length}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm">💧 Infiltration</span>
+                      <span className="font-bold text-orange-600">
+                        {searches.filter(s => s.search_type === 'INFILTRATION').length}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="bg-gradient-to-br from-green-50 to-green-100 rounded-2xl p-6">
+                  <h4 className="font-semibold mb-4 flex items-center gap-2">
+                    <FolderOpen className="h-5 w-5" />
+                    Projets
+                  </h4>
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center">
+                      <span className="text-sm">📊 Total</span>
+                      <span className="font-bold text-green-600">
+                        {projects.length}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Recherches */}
+          {activeTab === 'searches' && (
+            <div>
+              {searches.length === 0 ? (
+                <div className="text-center py-12 bg-gray-50 rounded-2xl">
+                  <Search className="h-12 w-12 mx-auto text-gray-300 mb-4" />
+                  <p className="text-gray-500">Aucune recherche pour ce client</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {searches.map(search => (
+                    <div key={search.id} className="border-2 border-gray-100 rounded-2xl p-5 hover:shadow-lg transition">
+                      <div className="flex items-start justify-between mb-3">
+                        <div className="flex items-start gap-3">
+                          {search.search_type === 'TERRAIN' ? (
+                            <div className="w-12 h-12 bg-blue-100 rounded-xl flex items-center justify-center flex-shrink-0">
+                              <Landmark className="h-6 w-6 text-blue-600" />
+                            </div>
+                          ) : (
+                            <div className="w-12 h-12 bg-orange-100 rounded-xl flex items-center justify-center flex-shrink-0">
+                              <Droplets className="h-6 w-6 text-orange-600" />
+                            </div>
+                          )}
+                          
+                          <div>
+                            <h4 className="font-semibold text-gray-800">{search.title || 'Sans titre'}</h4>
+                            <p className="text-sm text-gray-500">
+                              {new Date(search.created_at).toLocaleDateString('fr-FR')}
+                            </p>
+                          </div>
+                        </div>
+
+                        <span className={`px-3 py-1 rounded-full text-xs font-medium ${
+                          search.status === 'SHARED' 
+                            ? 'bg-green-100 text-green-700' 
+                            : search.status === 'ACTIVE'
+                            ? 'bg-blue-100 text-blue-700'
+                            : 'bg-gray-100 text-gray-700'
+                        }`}>
+                          {search.status === 'SHARED' ? '📤 Partagée' : 
+                           search.status === 'ACTIVE' ? '✅ Active' : '📝 Brouillon'}
+                        </span>
+                      </div>
+
+                      {search.address && (
+                        <div className="flex items-center gap-2 text-sm text-gray-600 mb-2">
+                          <MapPin className="h-4 w-4" />
+                          {search.address}
+                        </div>
+                      )}
+
+                      {search.description && (
+                        <p className="text-sm text-gray-600 line-clamp-2">{search.description}</p>
+                      )}
+
+                      {search.project_id && (
+                        <div className="mt-3 flex items-center gap-2 text-sm text-green-600">
+                          <CheckCircle className="h-4 w-4" />
+                          Converti en projet
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Projets */}
+          {activeTab === 'projects' && (
+            <div>
+              {projects.length === 0 ? (
+                <div className="text-center py-12 bg-gray-50 rounded-2xl">
+                  <FolderOpen className="h-12 w-12 mx-auto text-gray-300 mb-4" />
+                  <p className="text-gray-500">Aucun projet pour ce client</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  {projects.map(project => (
+                    <div key={project.id} className="border-2 border-gray-100 rounded-2xl p-5 hover:shadow-lg transition">
+                      <div className="flex items-start justify-between mb-3">
+                        <h4 className="font-semibold text-gray-800">{project.name}</h4>
+                        <span className={`px-3 py-1 rounded-full text-xs font-medium ${
+                          project.status === 'COMPLETED' 
+                            ? 'bg-green-100 text-green-700' 
+                            : project.status === 'ACTIVE'
+                            ? 'bg-blue-100 text-blue-700'
+                            : 'bg-yellow-100 text-yellow-700'
+                        }`}>
+                          {project.status}
+                        </span>
+                      </div>
+
+                      {project.description && (
+                        <p className="text-sm text-gray-600 mb-3 line-clamp-2">{project.description}</p>
+                      )}
+
+                      <div className="text-xs text-gray-400">
+                        Créé le {new Date(project.created_at).toLocaleDateString('fr-FR')}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Devis */}
+          {activeTab === 'quotes' && (
+            <div>
+              {quotes.length === 0 ? (
+                <div className="text-center py-12 bg-gray-50 rounded-2xl">
+                  <FileText className="h-12 w-12 mx-auto text-gray-300 mb-4" />
+                  <p className="text-gray-500">Aucun devis pour ce client</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {quotes.map(quote => (
+                    <div key={quote.id} className="border-2 border-gray-100 rounded-2xl p-5 hover:shadow-lg transition">
+                      <div className="flex items-start justify-between mb-3">
+                        <div>
+                          <h4 className="font-semibold text-gray-800 mb-1">{quote.title || 'Devis sans titre'}</h4>
+                          {quote.quote_number && (
+                            <span className="text-xs font-mono bg-gray-100 px-2 py-1 rounded">
+                              #{quote.quote_number}
+                            </span>
+                          )}
+                        </div>
+                        
+                        <span className={`px-3 py-1 rounded-full text-xs font-medium ${
+                          quote.status === 'CONVERTED_TO_WORKSITE' 
+                            ? 'bg-green-100 text-green-700' 
+                            : quote.status === 'SENT' || quote.status === 'PENDING'
+                            ? 'bg-blue-100 text-blue-700'
+                            : quote.status === 'DRAFT'
+                            ? 'bg-purple-100 text-purple-700'
+                            : 'bg-gray-100 text-gray-700'
+                        }`}>
+                          {quote.status === 'CONVERTED_TO_WORKSITE' ? '🏗️ Chantier' :
+                           quote.status === 'SENT' ? '📧 Envoyé' :
+                           quote.status === 'PENDING' ? '⏳ En attente' :
+                           quote.status === 'DRAFT' ? '📝 Brouillon' : quote.status}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-4 mb-3">
+                        <div>
+                          <p className="text-xs text-gray-500">Montant</p>
+                          <p className="text-lg font-bold text-gray-900">{quote.amount?.toFixed(2) || '0.00'}€</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-gray-500">Date</p>
+                          <p className="text-sm text-gray-700">
+                            {new Date(quote.created_at).toLocaleDateString('fr-FR')}
+                          </p>
+                        </div>
+                      </div>
+
+                      {quote.description && (
+                        <p className="text-sm text-gray-600 line-clamp-2 mb-3">{quote.description}</p>
+                      )}
+
+                      <div className="flex gap-2">
+                        <Button
+                          size="sm"
+                          onClick={() => window.open(`/devis/${quote.id}`, '_blank')}
+                          className="bg-gray-100 hover:bg-gray-200 text-gray-900 rounded-lg text-xs"
+                        >
+                          <FileText className="h-3 w-3 mr-1" />
+                          Voir le devis
+                        </Button>
+                        {quote.status === 'CONVERTED_TO_WORKSITE' && (
+                          <span className="inline-flex items-center text-xs text-green-600 bg-green-50 px-2 py-1 rounded-lg">
+                            <CheckCircle className="h-3 w-3 mr-1" />
+                            Converti en chantier
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Factures / Chantiers */}
+          {activeTab === 'invoices' && (
+            <div>
+              {invoices.length === 0 ? (
+                <div className="text-center py-12 bg-gray-50 rounded-2xl">
+                  <Receipt className="h-12 w-12 mx-auto text-gray-300 mb-4" />
+                  <p className="text-gray-500">Aucun chantier pour ce client</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {invoices.map(worksite => (
+                    <div key={worksite.id} className="border-2 border-purple-100 rounded-2xl p-5 hover:shadow-lg transition">
+                      <div className="flex items-start justify-between mb-3">
+                        <div>
+                          <h4 className="font-semibold text-gray-800 mb-1">{worksite.title || 'Chantier sans titre'}</h4>
+                          {worksite.address && (
+                            <div className="flex items-center gap-1 text-xs text-gray-500 mt-1">
+                              <MapPin className="h-3 w-3" />
+                              {worksite.address}
+                            </div>
+                          )}
+                        </div>
+                        
+                        <span className={`px-3 py-1 rounded-full text-xs font-medium ${
+                          worksite.status === 'COMPLETED' 
+                            ? 'bg-green-100 text-green-700' 
+                            : worksite.status === 'IN_PROGRESS'
+                            ? 'bg-blue-100 text-blue-700'
+                            : worksite.status === 'PENDING'
+                            ? 'bg-orange-100 text-orange-700'
+                            : 'bg-gray-100 text-gray-700'
+                        }`}>
+                          {worksite.status === 'COMPLETED' ? '✓ Terminé' :
+                           worksite.status === 'IN_PROGRESS' ? '⚙️ En cours' :
+                           worksite.status === 'PENDING' ? '⏳ En attente' : worksite.status}
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-4 mb-3">
+                        <div>
+                          <p className="text-xs text-gray-500">Montant</p>
+                          <p className="text-lg font-bold text-gray-900">{worksite.amount?.toFixed(2) || '0.00'}€</p>
+                        </div>
+                        <div>
+                          <p className="text-xs text-gray-500">Date de création</p>
+                          <p className="text-sm text-gray-700">
+                            {new Date(worksite.created_at).toLocaleDateString('fr-FR')}
+                          </p>
+                        </div>
+                      </div>
+
+                      {worksite.description && (
+                        <p className="text-sm text-gray-600 line-clamp-2 mb-3">{worksite.description}</p>
+                      )}
+
+                      <div className="flex gap-2 flex-wrap">
+                        {worksite.quote_id && (
+                          <Button
+                            size="sm"
+                            onClick={() => window.open(`/devis/${worksite.quote_id}`, '_blank')}
+                            className="bg-blue-100 hover:bg-blue-200 text-blue-900 rounded-lg text-xs"
+                          >
+                            <FileText className="h-3 w-3 mr-1" />
+                            Voir le devis
+                          </Button>
+                        )}
+                        {worksite.status === 'COMPLETED' && (
+                          <span className="inline-flex items-center text-xs text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg">
+                            <CheckCircle className="h-3 w-3 mr-1" />
+                            Facturé
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+};
+
 // Clients View Component - Complete Implementation
 const ClientsView = () => {
   const [clients, setClients] = useState([]);
@@ -10594,6 +16181,8 @@ const ClientsView = () => {
   const [showForm, setShowForm] = useState(false);
   const [editingClient, setEditingClient] = useState(null);
   const [searchTerm, setSearchTerm] = useState('');
+  const [selectedClient, setSelectedClient] = useState(null);
+  const [showClientDetails, setShowClientDetails] = useState(false);
   const [formData, setFormData] = useState({
     nom: '',
     email: '',
@@ -10676,6 +16265,24 @@ const ClientsView = () => {
     }
   };
 
+  const handleClientClick = (client) => {
+    setSelectedClient(client);
+    setShowClientDetails(true);
+  };
+
+  if (showClientDetails && selectedClient) {
+    return (
+      <ClientDetailsView 
+        clientId={selectedClient.id}
+        onBack={() => {
+          setShowClientDetails(false);
+          setSelectedClient(null);
+          loadClients();
+        }}
+      />
+    );
+  }
+
   if (loading) {
     return (
       <Card className="bg-white/80 backdrop-blur-xl rounded-3xl border-0 shadow-2xl">
@@ -10697,6 +16304,17 @@ const ClientsView = () => {
             <p className="text-gray-600 mt-1">Base de données clients et historique des interventions</p>
           </div>
           <div className="flex space-x-3">
+            <Button
+              onClick={() => {
+                setSelectedClient({ id: 'NO_CLIENT', nom: 'Clients occasionnels' });
+                setShowClientDetails(true);
+              }}
+              variant="outline"
+              className="rounded-2xl px-6 py-3 border-2 border-gray-300 hover:border-gray-400"
+            >
+              <FileText className="h-4 w-4 mr-2" />
+              Recherches sans client
+            </Button>
             <Button
               onClick={() => setShowForm(true)}
               className="bg-gradient-to-r from-teal-600 to-teal-700 hover:from-teal-700 hover:to-teal-800 text-white rounded-2xl px-6 py-3 shadow-lg transform transition-all duration-200 hover:scale-105"
@@ -10832,7 +16450,7 @@ const ClientsView = () => {
               );
             })
             .map((client) => (
-            <Card key={client.id} className="bg-white/80 backdrop-blur-xl rounded-3xl border-0 shadow-lg hover:shadow-xl transition-all duration-300">
+            <Card key={client.id} className="bg-white/80 backdrop-blur-xl rounded-3xl border-0 shadow-lg hover:shadow-xl transition-all duration-300 cursor-pointer" onClick={() => handleClientClick(client)}>
               <CardContent className="p-6">
                 <div className="flex items-start justify-between">
                   <div className="flex-1">
@@ -10871,18 +16489,15 @@ const ClientsView = () => {
                   <div className="flex flex-col space-y-2">
                     <div className="flex space-x-2">
                       <Button
-                        onClick={() => editClient(client)}
+                        onClick={(e) => { e.stopPropagation(); editClient(client); }}
                         size="sm"
                         variant="outline"
                         className="rounded-xl flex-1"
                       >
                         Modifier
                       </Button>
-                      <Button size="sm" className="bg-teal-600 hover:bg-teal-700 text-white rounded-xl flex-1">
-                        Historique
-                      </Button>
                       <Button
-                        onClick={() => deleteClient(client.id, client.nom)}
+                        onClick={(e) => { e.stopPropagation(); deleteClient(client.id, client.nom); }}
                         size="sm"
                         variant="destructive"
                         className="bg-red-600 hover:bg-red-700 text-white rounded-xl"
@@ -10891,6 +16506,7 @@ const ClientsView = () => {
                       </Button>
                     </div>
                     <Button
+                      onClick={(e) => e.stopPropagation()}
                       size="sm"
                       variant="outline"
                       className="rounded-xl border-2 border-teal-500 text-teal-600 hover:bg-teal-50 w-full"
@@ -10916,6 +16532,8 @@ const CatalogManagement = () => {
   const [loading, setLoading] = useState(false);
   const [showForm, setShowForm] = useState(false);
   const [editingProduct, setEditingProduct] = useState(null);
+  const [productPhoto, setProductPhoto] = useState(null);
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
   const [formData, setFormData] = useState({
     name: '',
     description: '',
@@ -10929,56 +16547,56 @@ const CatalogManagement = () => {
     loadProducts();
   }, []);
 
-  const loadProducts = () => {
-    // Simulation de données produits
-    setProducts([
-      {
-        id: '1',
-        name: 'Détection réseaux électriques',
-        description: 'Localisation précise des câbles électriques souterrains',
-        category: 'Détection',
-        price: 150,
-        unit: 'mètre linéaire',
-        reference: 'DET-ELEC-001'
-      },
-      {
-        id: '2',
-        name: 'Recherche canalisations eau',
-        description: 'Localisation des conduites d\'eau potable et usée',
-        category: 'Détection',
-        price: 120,
-        unit: 'mètre linéaire',
-        reference: 'DET-EAU-001'
-      },
-      {
-        id: '3',
-        name: 'Inspection vidéo canalisation',
-        description: 'Inspection par caméra des canalisations',
-        category: 'Inspection',
-        price: 200,
-        unit: 'mètre linéaire',
-        reference: 'INSP-VID-001'
-      }
-    ]);
+  const loadProducts = async () => {
+    try {
+      setLoading(true);
+      const response = await axios.get(`${API}/catalog/products`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      setProducts(response.data.data || []);
+    } catch (error) {
+      console.error('Erreur chargement produits:', error);
+      alert('Erreur lors du chargement des produits');
+    } finally {
+      setLoading(false);
+    }
   };
 
-  const handleSubmit = (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     
-    const newProduct = {
-      id: editingProduct?.id || Date.now().toString(),
-      ...formData,
-      price: parseFloat(formData.price)
-    };
-
-    if (editingProduct) {
-      setProducts(prev => prev.map(p => p.id === editingProduct.id ? newProduct : p));
-    } else {
-      setProducts(prev => [...prev, newProduct]);
+    try {
+      setLoading(true);
+      
+      const productData = {
+        ...formData,
+        photo: productPhoto ? {
+          name: productPhoto.name,
+          type: productPhoto.type,
+          data: productPhoto.data
+        } : null
+      };
+      
+      if (editingProduct) {
+        await axios.put(`${API}/catalog/products/${editingProduct.id}`, productData, {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        });
+        alert('Produit modifié avec succès !');
+      } else {
+        await axios.post(`${API}/catalog/products`, productData, {
+          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+        });
+        alert('Produit ajouté avec succès !');
+      }
+      
+      await loadProducts();
+      resetForm();
+    } catch (error) {
+      console.error('Erreur sauvegarde produit:', error);
+      alert('Erreur lors de la sauvegarde du produit');
+    } finally {
+      setLoading(false);
     }
-
-    resetForm();
-    alert(editingProduct ? 'Produit modifié !' : 'Produit ajouté !');
   };
 
   const resetForm = () => {
@@ -10990,6 +16608,8 @@ const CatalogManagement = () => {
       unit: 'unité',
       reference: ''
     });
+    setProductPhoto(null);
+    setUploadingPhoto(false);
     setShowForm(false);
     setEditingProduct(null);
   };
@@ -11007,9 +16627,20 @@ const CatalogManagement = () => {
     setShowForm(true);
   };
 
-  const deleteProduct = (productId) => {
-    if (confirm('Êtes-vous sûr de vouloir supprimer ce produit ?')) {
+  const deleteProduct = async (productId) => {
+    if (!window.confirm('Êtes-vous sûr de vouloir supprimer ce produit ?')) {
+      return;
+    }
+    
+    try {
+      await axios.delete(`${API}/catalog/products/${productId}`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
       setProducts(prev => prev.filter(p => p.id !== productId));
+      alert('Produit supprimé avec succès !');
+    } catch (error) {
+      console.error('Erreur suppression produit:', error);
+      alert('Erreur lors de la suppression du produit');
     }
   };
 
@@ -11135,6 +16766,50 @@ const CatalogManagement = () => {
                     <option value="heure">heure</option>
                     <option value="forfait">forfait</option>
                   </select>
+                </div>
+              </div>
+
+              {/* Section Photo */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-3">Photo du produit (optionnel)</label>
+                <div className="space-y-3">
+                  <div className="flex items-center gap-3">
+                    <label className="flex-1 cursor-pointer">
+                      <div className="flex items-center justify-center gap-2 px-4 py-3 border-2 border-dashed border-gray-300 rounded-xl hover:border-indigo-400 hover:bg-indigo-50 transition-all">
+                        <Camera className="h-5 w-5 text-gray-500" />
+                        <span className="text-sm text-gray-600">
+                          {uploadingPhoto ? 'Téléchargement...' : 'Ajouter une photo'}
+                        </span>
+                      </div>
+                      <input
+                        type="file"
+                        accept="image/*"
+                        onChange={handleProductPhotoUpload}
+                        className="hidden"
+                        disabled={uploadingPhoto}
+                      />
+                    </label>
+                  </div>
+
+                  {productPhoto && (
+                    <div className="relative inline-block">
+                      <img
+                        src={productPhoto.preview}
+                        alt={productPhoto.name}
+                        className="w-48 h-32 object-cover rounded-lg border-2 border-gray-200"
+                      />
+                      <button
+                        type="button"
+                        onClick={removeProductPhoto}
+                        className="absolute top-2 right-2 bg-red-500 text-white rounded-full p-1.5 hover:bg-red-600 transition-colors"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                      <div className="mt-1 text-xs text-gray-600 truncate max-w-[12rem]">
+                        {productPhoto.name}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -11429,6 +17104,7 @@ const InviteManagementView = () => {
                     </SelectTrigger>
                     <SelectContent>
                       <SelectItem value="TECHNICIEN">Technicien / User</SelectItem>
+                      <SelectItem value="BUREAU">Bureau</SelectItem>
                       <SelectItem value="ADMIN">Admin</SelectItem>
                     </SelectContent>
                   </Select>
@@ -11443,13 +17119,23 @@ const InviteManagementView = () => {
                     <li>• Générer des rapports PDF</li>
                     <li>• Partager avec le bureau</li>
                   </ul>
-                ) : (
+                ) : formData.role === 'BUREAU' ? (
                   <ul className="text-sm text-pink-700 space-y-1">
                     <li>• Toutes les permissions du Technicien</li>
                     <li>• Voir toutes les recherches de la société</li>
                     <li>• Gérer les clients, devis, chantiers</li>
-                    <li>• Inviter de nouveaux utilisateurs</li>
+                    <li>• Gérer le planning et les équipes</li>
                     <li>• Gérer le matériel et les équipements</li>
+                    <li>❌ Ne peut pas inviter de membres</li>
+                    <li>❌ Pas d'accès aux statistiques</li>
+                  </ul>
+                ) : (
+                  <ul className="text-sm text-pink-700 space-y-1">
+                    <li>• Toutes les permissions du Bureau</li>
+                    <li>• Inviter de nouveaux utilisateurs</li>
+                    <li>• Accès aux statistiques de l'entreprise</li>
+                    <li>• Supprimer des plannings</li>
+                    <li>• Gérer tous les aspects de l'entreprise</li>
                   </ul>
                 )}
               </div>
@@ -11530,7 +17216,9 @@ const InviteManagementView = () => {
                           <h3 className="text-lg font-semibold text-gray-900">{invite.email}</h3>
                           <div className="flex items-center space-x-2 mt-1">
                             <Badge className={getRoleColor(invite.role)}>
-                              {invite.role === 'TECHNICIEN' ? 'Technicien / User' : invite.role}
+                              {invite.role === 'TECHNICIEN' ? 'Technicien / User' : 
+                               invite.role === 'BUREAU' ? 'Bureau' : 
+                               invite.role === 'ADMIN' ? 'Admin' : invite.role}
                             </Badge>
                             <Badge className={getStatusColor(invite.status)}>
                               {isPending ? (expired ? 'Expirée' : 'En attente') : 
@@ -11619,47 +17307,145 @@ const InviteManagementView = () => {
     </div>
   );
 };
-// Apple-style Bureau Layout Component with Back Button
-// Gestion du Matériel (liste, ajout, édition, suppression)
-import { api } from './lib/supabase'
+// Gestion du Matériel (liste, ajout, édition, suppression, QR codes, maintenance)
+import { api, supabase } from './lib/supabase'
 const MaterialManagement = () => {
+  // ═══════════════════════════════════════════════════
+  //  ÉTATS PRINCIPAUX
+  // ═══════════════════════════════════════════════════
   const [items, setItems] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [me, setMe] = useState(null)
+  const [activeTab, setActiveTab] = useState('inventory')
+  // Détail d'un matériel sélectionné
+  const [selectedItem, setSelectedItem] = useState(null)
+  const [maintenanceLogs, setMaintenanceLogs] = useState([])
+  const [logsLoading, setLogsLoading] = useState(false)
+  // Formulaire d'ajout/édition
   const [form, setForm] = useState({
     id: null,
     name: '',
     description: '',
     category: 'TOOL',
     location: '',
+    serial_number: '',
+    brand: '',
+    model: '',
+    purchase_date: '',
+    warranty_end: '',
+    condition: 'BON',
+    maintenance_interval_days: '',
+    notes: '',
     qr_code: ''
   })
   const [saving, setSaving] = useState(false)
-  const [me, setMe] = useState(null)
+  // Formulaire maintenance
+  const [maintenanceForm, setMaintenanceForm] = useState({
+    maintenance_type: 'ENTRETIEN',
+    description: '',
+    cost: '',
+    performed_at: new Date().toISOString().split('T')[0],
+    next_due_date: ''
+  })
+  const [savingMaintenance, setSavingMaintenance] = useState(false)
+  // Scanner QR
   const [scanning, setScanning] = useState(false)
   const videoRef = useRef(null)
-  const canvasRef = useRef(null)
   const [scanResult, setScanResult] = useState('')
-  // Filtres et recherche
+  // Filtres
   const [searchTerm, setSearchTerm] = useState('')
   const [filterCategory, setFilterCategory] = useState('ALL')
-  const [filterAvailability, setFilterAvailability] = useState('ALL')
+  const [filterCondition, setFilterCondition] = useState('ALL')
   // Confirmation suppression
   const [deleteItem, setDeleteItem] = useState(null)
-  // Aperçu QR généré à l'enregistrement
+  // Aperçu QR
   const [qrPreviewUrl, setQrPreviewUrl] = useState('')
-  // Liste filtrée (mémoïsé)
+
+  // ═══════════════════════════════════════════════════
+  //  CONSTANTES
+  // ═══════════════════════════════════════════════════
+  const CATEGORIES = [
+    { value: 'TOOL', label: 'Outil', icon: '🔧' },
+    { value: 'SAFETY', label: 'Sécurité', icon: '🦺' },
+    { value: 'MEASUREMENT', label: 'Mesure', icon: '📏' },
+    { value: 'VEHICLE', label: 'Véhicule', icon: '🚛' },
+    { value: 'EQUIPMENT', label: 'Équipement lourd', icon: '⚙️' },
+    { value: 'CONSUMABLE', label: 'Consommable', icon: '📦' }
+  ]
+
+  const CONDITIONS = [
+    { value: 'NEUF', label: 'Neuf', color: 'bg-emerald-100 text-emerald-800', dot: 'bg-emerald-500' },
+    { value: 'BON', label: 'Bon état', color: 'bg-blue-100 text-blue-800', dot: 'bg-blue-500' },
+    { value: 'USAGE', label: 'Usé', color: 'bg-amber-100 text-amber-800', dot: 'bg-amber-500' },
+    { value: 'A_REVISER', label: 'À réviser', color: 'bg-orange-100 text-orange-800', dot: 'bg-orange-500' },
+    { value: 'FIN_DE_VIE', label: 'Fin de vie', color: 'bg-red-100 text-red-800', dot: 'bg-red-500' }
+  ]
+
+  const MAINTENANCE_TYPES = [
+    { value: 'ENTRETIEN', label: 'Entretien courant', icon: '🔧' },
+    { value: 'REPARATION', label: 'Réparation', icon: '🛠️' },
+    { value: 'INSPECTION', label: 'Inspection', icon: '🔍' },
+    { value: 'CONTROLE', label: 'Contrôle réglementaire', icon: '📋' },
+    { value: 'REMPLACEMENT_PIECE', label: 'Remplacement pièce', icon: '🔩' }
+  ]
+
+  // ═══════════════════════════════════════════════════
+  //  UTILITAIRES
+  // ═══════════════════════════════════════════════════
+  const getConditionInfo = (cond) => CONDITIONS.find(c => c.value === cond) || CONDITIONS[1]
+  const getCategoryInfo = (cat) => CATEGORIES.find(c => c.value === cat) || CATEGORIES[0]
+  const getMaintenanceTypeInfo = (type) => MAINTENANCE_TYPES.find(t => t.value === type) || MAINTENANCE_TYPES[0]
+
+  const isMaintenanceDue = (item) => {
+    if (!item.next_maintenance_date) return false
+    return new Date(item.next_maintenance_date) <= new Date()
+  }
+
+  const isMaintenanceSoon = (item) => {
+    if (!item.next_maintenance_date) return false
+    const diff = new Date(item.next_maintenance_date) - new Date()
+    return diff > 0 && diff < 7 * 24 * 60 * 60 * 1000
+  }
+
+  const daysUntilMaintenance = (item) => {
+    if (!item.next_maintenance_date) return null
+    const diff = new Date(item.next_maintenance_date) - new Date()
+    return Math.ceil(diff / (24 * 60 * 60 * 1000))
+  }
+
+  const cryptoRandom = () => {
+    try { return 'SKY_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8).toUpperCase() }
+    catch { return 'SKY_' + Date.now() }
+  }
+
+  // ═══════════════════════════════════════════════════
+  //  FILTRAGE MÉMORISÉ
+  // ═══════════════════════════════════════════════════
   const filteredItems = React.useMemo(() => {
     const term = searchTerm.trim().toLowerCase()
     return items.filter(m => {
-      const okSearch = !term || [m.name, m.description, m.location, m.qr_code].some(x => (x||'').toLowerCase().includes(term))
+      const okSearch = !term || [m.name, m.description, m.location, m.serial_number, m.brand, m.model, m.qr_code].some(x => (x || '').toLowerCase().includes(term))
       const okCat = filterCategory === 'ALL' || (m.category || '') === filterCategory
-      const effectiveStatus = m.assigned_to ? 'IN_USE' : (m.status || 'AVAILABLE')
-      const okAvail = filterAvailability === 'ALL' || effectiveStatus === filterAvailability
-      return okSearch && okCat && okAvail
+      const okCond = filterCondition === 'ALL' || (m.condition || 'BON') === filterCondition
+      return okSearch && okCat && okCond
     })
-  }, [items, searchTerm, filterCategory, filterAvailability])
+  }, [items, searchTerm, filterCategory, filterCondition])
 
+  // Stats
+  const stats = React.useMemo(() => ({
+    total: items.length,
+    neuf: items.filter(m => m.condition === 'NEUF').length,
+    bon: items.filter(m => m.condition === 'BON' || !m.condition).length,
+    usage: items.filter(m => m.condition === 'USAGE').length,
+    a_reviser: items.filter(m => m.condition === 'A_REVISER').length,
+    fin_de_vie: items.filter(m => m.condition === 'FIN_DE_VIE' || m.end_of_life).length,
+    maintenance_due: items.filter(m => isMaintenanceDue(m)).length
+  }), [items])
+
+  // ═══════════════════════════════════════════════════
+  //  CHARGEMENT DES DONNÉES
+  // ═══════════════════════════════════════════════════
   const load = async () => {
     setLoading(true)
     const { data, error } = await api.materials.getAll()
@@ -11668,51 +17454,78 @@ const MaterialManagement = () => {
     setLoading(false)
   }
 
-  useEffect(() => { load(); (async()=>{ const { data } = await api.users.getCurrent(); setMe(data||null) })() }, [])
-  // Arrêter proprement la caméra si composant démonte
-  useEffect(() => {
-    return () => {
-      try { stopScan() } catch {}
-    }
-  }, [])
+  const loadMaintenanceLogs = async (materialId) => {
+    setLogsLoading(true)
+    const { data, error } = await api.materials.getMaintenanceLogs(materialId)
+    if (error) { setError(String(error.message || error)); setMaintenanceLogs([]) }
+    else setMaintenanceLogs(data || [])
+    setLogsLoading(false)
+  }
 
-  const resetForm = () => setForm({ id: null, name: '', description: '', category: 'TOOL', location: '', qr_code: '' })
+  useEffect(() => { 
+    load(); 
+    (async () => { 
+      const { data } = await api.users.getCurrent(); 
+      if (data) {
+        setMe(data)
+      } else {
+        // Fallback: utiliser le user stocké en localStorage
+        const stored = localStorage.getItem('user')
+        if (stored) setMe(JSON.parse(stored))
+      }
+    })() 
+  }, [])
+  useEffect(() => { return () => { try { stopScan() } catch {} } }, [])
+
+  // ═══════════════════════════════════════════════════
+  //  CRUD MATÉRIEL
+  // ═══════════════════════════════════════════════════
+  const resetForm = () => setForm({
+    id: null, name: '', description: '', category: 'TOOL', location: '',
+    serial_number: '', brand: '', model: '', purchase_date: '', warranty_end: '',
+    condition: 'BON', maintenance_interval_days: '', notes: '', qr_code: ''
+  })
 
   const onSubmit = async (e) => {
     e.preventDefault()
     setSaving(true)
+    setError('')
     try {
-      // Toujours générer un nouveau code QR à chaque enregistrement
-      const newQr = cryptoRandom()
+      const newQr = form.id ? form.qr_code : cryptoRandom()
+      const userStr = localStorage.getItem('user')
+      const currentUser = userStr ? JSON.parse(userStr) : null
       const payload = {
         name: form.name,
         description: form.description || null,
         category: form.category,
         location: form.location || null,
+        serial_number: form.serial_number || null,
+        brand: form.brand || null,
+        model: form.model || null,
+        purchase_date: form.purchase_date || null,
+        warranty_end: form.warranty_end || null,
+        condition: form.condition || 'BON',
+        maintenance_interval_days: form.maintenance_interval_days ? parseInt(form.maintenance_interval_days) : null,
+        notes: form.notes || null,
         qr_code: newQr,
-        // Statut par défaut selon assignment
-        status: form?.assigned_to ? 'IN_USE' : 'AVAILABLE'
+        end_of_life: form.condition === 'FIN_DE_VIE',
+        company_id: currentUser?.company_id
       }
       if (form.id) {
         const { error } = await api.materials.update(form.id, payload)
         if (error) throw error
-        // Aperçu QR via service d'image
-        const url = `https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=${encodeURIComponent(newQr)}`
-        setQrPreviewUrl(url)
       } else {
         const { data, error } = await api.materials.create(payload)
         if (error) throw error
-        // Après création, générer l'image QR (aperçu/téléchargement)
-        const url = `https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=${encodeURIComponent(newQr)}`
-        setQrPreviewUrl(url)
       }
+      const url = `https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(newQr)}`
+      setQrPreviewUrl(url)
       await load()
       resetForm()
+      setActiveTab('inventory')
     } catch (err) {
       setError(String(err.message || err))
-    } finally {
-      setSaving(false)
-    }
+    } finally { setSaving(false) }
   }
 
   const onEdit = (m) => {
@@ -11722,84 +17535,111 @@ const MaterialManagement = () => {
       description: m.description || '',
       category: m.category || 'TOOL',
       location: m.location || '',
+      serial_number: m.serial_number || '',
+      brand: m.brand || '',
+      model: m.model || '',
+      purchase_date: m.purchase_date || '',
+      warranty_end: m.warranty_end || '',
+      condition: m.condition || 'BON',
+      maintenance_interval_days: m.maintenance_interval_days || '',
+      notes: m.notes || '',
       qr_code: m.qr_code || ''
     })
+    setActiveTab('form')
   }
 
   const onDeleteConfirmed = async () => {
     if (!deleteItem) return
     const { error } = await api.materials.remove(deleteItem.id)
-    if (error) {
-      setError(String(error.message || error));
-    } else {
-      await load()
-    }
+    if (error) { setError(String(error.message || error)) }
+    else { await load(); if (selectedItem?.id === deleteItem.id) { setSelectedItem(null) } }
     setDeleteItem(null)
   }
 
-  const onAssignToMe = async (m) => {
-    if (!me) { setError('Utilisateur non authentifié.'); return }
-    const updates = { assigned_to: me.id, assigned_date: new Date().toISOString(), status: 'IN_USE' }
-    const { error } = await api.materials.update(m.id, updates)
-    if (error) setError(String(error.message || error)); else load()
+  // ═══════════════════════════════════════════════════
+  //  MAINTENANCE
+  // ═══════════════════════════════════════════════════
+  const resetMaintenanceForm = () => setMaintenanceForm({
+    maintenance_type: 'ENTRETIEN', description: '', cost: '',
+    performed_at: new Date().toISOString().split('T')[0], next_due_date: ''
+  })
+
+  const onSubmitMaintenance = async (e) => {
+    e.preventDefault()
+    if (!selectedItem || !me) return
+    setSavingMaintenance(true)
+    setError('')
+    try {
+      const log = {
+        material_id: selectedItem.id,
+        company_id: me.company_id,
+        performed_by: me.id,
+        maintenance_type: maintenanceForm.maintenance_type,
+        description: maintenanceForm.description || null,
+        cost: maintenanceForm.cost ? parseFloat(maintenanceForm.cost) : null,
+        performed_at: maintenanceForm.performed_at || new Date().toISOString(),
+        next_due_date: maintenanceForm.next_due_date || null
+      }
+      const { error } = await api.materials.addMaintenanceLog(log)
+      if (error) throw error
+      // Mettre à jour la date de dernière et prochaine maintenance sur le matériel
+      const updates = {
+        last_maintenance_date: maintenanceForm.performed_at || new Date().toISOString().split('T')[0]
+      }
+      if (maintenanceForm.next_due_date) {
+        updates.next_maintenance_date = maintenanceForm.next_due_date
+      } else if (selectedItem.maintenance_interval_days) {
+        const next = new Date(maintenanceForm.performed_at || new Date())
+        next.setDate(next.getDate() + parseInt(selectedItem.maintenance_interval_days))
+        updates.next_maintenance_date = next.toISOString().split('T')[0]
+      }
+      await api.materials.update(selectedItem.id, updates)
+      await loadMaintenanceLogs(selectedItem.id)
+      await load()
+      // Rafraîchir l'item sélectionné
+      const refreshed = (await api.materials.scanQR(selectedItem.qr_code))?.data
+      if (refreshed) setSelectedItem(refreshed)
+      resetMaintenanceForm()
+    } catch (err) {
+      setError(String(err.message || err))
+    } finally { setSavingMaintenance(false) }
   }
 
-  const onReturn = async (m) => {
-    const updates = { assigned_to: null, assigned_date: null, status: 'AVAILABLE' }
-    const { error } = await api.materials.update(m.id, updates)
-    if (error) setError(String(error.message || error)); else load()
-  }
-
+  // ═══════════════════════════════════════════════════
+  //  QR SCANNER
+  // ═══════════════════════════════════════════════════
   const startScan = async () => {
     setScanResult('')
     setScanning(true)
     try {
-      if (!navigator.mediaDevices?.getUserMedia) {
-        setError('Caméra non disponible');
-        setScanning(false)
-        return
-      }
+      if (!navigator.mediaDevices?.getUserMedia) { setError('Caméra non disponible'); setScanning(false); return }
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream
-        await videoRef.current.play()
-      }
+      if (videoRef.current) { videoRef.current.srcObject = stream; await videoRef.current.play() }
       if ('BarcodeDetector' in window) {
         const detector = new window.BarcodeDetector({ formats: ['qr_code'] })
         const tick = async () => {
-          if (!scanning) return
+          if (!videoRef.current?.srcObject) return
           try {
             const detections = await detector.detect(videoRef.current)
-            if (detections && detections[0]) {
-              const code = detections[0].rawValue || detections[0].rawValue || ''
-              if (code) {
-                setScanResult(code)
-                await onScanFound(code)
-                stopScan()
-                return
-              }
+            if (detections?.[0]?.rawValue) {
+              const code = detections[0].rawValue
+              setScanResult(code)
+              await onScanFound(code)
+              stopScan()
+              return
             }
           } catch {}
           requestAnimationFrame(tick)
         }
         requestAnimationFrame(tick)
-      } else {
-        // Fallback: pas de decodeur - on affiche juste la vidéo et l'utilisateur tape le code
       }
-    } catch (e) {
-      setError(String(e.message || e))
-      setScanning(false)
-    }
+    } catch (e) { setError(String(e.message || e)); setScanning(false) }
   }
 
   const stopScan = () => {
     setScanning(false)
     const v = videoRef.current
-    if (v && v.srcObject) {
-      const tracks = v.srcObject.getTracks()
-      tracks.forEach(t => t.stop())
-      v.srcObject = null
-    }
+    if (v?.srcObject) { v.srcObject.getTracks().forEach(t => t.stop()); v.srcObject = null }
   }
 
   const onScanFound = async (qr) => {
@@ -11807,163 +17647,571 @@ const MaterialManagement = () => {
       const { data, error } = await api.materials.scanQR(qr)
       if (error) throw error
       if (data) {
-        // Charger l’élément scanné dans le formulaire pour édition rapide
-        onEdit(data)
-      } else {
-        setError('QR non reconnu')
-      }
-    } catch (e) {
-      setError(String(e.message || e))
-    }
+        setSelectedItem(data)
+        await loadMaintenanceLogs(data.id)
+        setActiveTab('inventory')
+      } else { setError('QR non reconnu dans votre inventaire') }
+    } catch (e) { setError(String(e.message || e)) }
   }
 
-  const cryptoRandom = () => {
-    try {
-      // Simple QR id fallback
-      return 'QR_' + Math.random().toString(36).slice(2, 10)
-    } catch {
-      return 'QR_' + Date.now()
-    }
+  const openDetail = async (item) => {
+    setSelectedItem(item)
+    await loadMaintenanceLogs(item.id)
   }
 
+  const closeDetail = () => {
+    setSelectedItem(null)
+    setMaintenanceLogs([])
+    resetMaintenanceForm()
+  }
+
+  // ═══════════════════════════════════════════════════
+  //  RENDU
+  // ═══════════════════════════════════════════════════
   return (
     <div className="space-y-6">
-      <Card className="bg-white/80 backdrop-blur-xl rounded-3xl border-0 shadow-2xl">
-        <CardHeader>
-          <CardTitle>Gestion du Matériel</CardTitle>
-          <CardDescription>Ajoutez, modifiez et supprimez les équipements de votre entreprise.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <form onSubmit={onSubmit} className="grid grid-cols-1 md:grid-cols-5 gap-3">
-            <Input placeholder="Nom" value={form.name} onChange={(e)=>setForm({...form, name: e.target.value})} required className="md:col-span-2 rounded-xl" />
-            <div>
-              <Select value={form.category} onValueChange={(v)=>setForm({...form, category: v})}>
-                <SelectTrigger className="rounded-xl"><SelectValue placeholder="Catégorie" /></SelectTrigger>
-                <SelectContent>
-                  {['TOOL','SAFETY','MEASUREMENT','VEHICLE','EQUIPMENT','CONSUMABLE'].map(opt=> (
-                    <SelectItem key={opt} value={opt}>{opt}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <Input placeholder="Localisation" value={form.location} onChange={(e)=>setForm({...form, location: e.target.value})} className="rounded-xl" />
-            <Input placeholder="QR Code (généré automatiquement à l'enregistrement)" value={form.qr_code} readOnly className="rounded-xl" />
-            <Input placeholder="Description" value={form.description} onChange={(e)=>setForm({...form, description: e.target.value})} className="md:col-span-5 rounded-xl" />
-            <div className="md:col-span-5 flex gap-2">
-              <Button type="submit" disabled={saving} className="rounded-xl">{form.id ? 'Mettre à jour' : 'Ajouter'}</Button>
-              {form.id && (
-                <Button type="button" variant="outline" onClick={resetForm} className="rounded-xl">Annuler</Button>
-              )}
-              <Button type="button" variant="outline" onClick={scanning?stopScan:startScan} className="rounded-xl">
-                {scanning ? 'Arrêter le scan' : 'Scanner un QR'}
-              </Button>
-            </div>
-          </form>
-          {error && <div className="text-red-600 text-sm mt-2">{error}</div>}
-          {qrPreviewUrl && (
-            <div className="mt-4 flex items-center gap-4">
-              <img src={qrPreviewUrl} alt="QR Code" className="w-40 h-40 border rounded-xl" />
-              <a href={qrPreviewUrl} download={`qr_${Date.now()}.png`} className="text-blue-600 underline text-sm">Télécharger le QR</a>
-            </div>
-          )}
-          {scanning && (
-            <div className="mt-4 space-y-2">
-              <video ref={videoRef} className="w-full max-w-md rounded-xl border" muted playsInline />
-              {scanResult && <div className="text-sm text-gray-600">Code détecté: {scanResult}</div>}
-              {!("BarcodeDetector" in window) && (
-                <div className="text-xs text-gray-500">Votre navigateur ne supporte pas la détection automatique. Renseignez manuellement le QR dans le champ, ou utilisez un navigateur récent (Chrome/Edge/Android).</div>
-              )}
-            </div>
-          )}
-        </CardContent>
-      </Card>
+      {/* En-tête avec statistiques */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
+        {[
+          { label: 'Total', value: stats.total, icon: Package, color: 'text-gray-700', bg: 'bg-gray-50' },
+          { label: 'Neuf', value: stats.neuf, icon: Star, color: 'text-emerald-700', bg: 'bg-emerald-50' },
+          { label: 'Bon état', value: stats.bon, icon: Check, color: 'text-blue-700', bg: 'bg-blue-50' },
+          { label: 'Usé', value: stats.usage, icon: Clock, color: 'text-amber-700', bg: 'bg-amber-50' },
+          { label: 'À réviser', value: stats.a_reviser, icon: Wrench, color: 'text-orange-700', bg: 'bg-orange-50' },
+          { label: 'Fin de vie', value: stats.fin_de_vie, icon: AlertTriangle, color: 'text-red-700', bg: 'bg-red-50' },
+          { label: 'Entretien dû', value: stats.maintenance_due, icon: Calendar, color: 'text-purple-700', bg: 'bg-purple-50' }
+        ].map((s, i) => (
+          <div key={i} className={`${s.bg} rounded-2xl p-3 flex flex-col items-center justify-center`}>
+            <s.icon className={`h-5 w-5 ${s.color} mb-1`} />
+            <div className={`text-xl font-bold ${s.color}`}>{s.value}</div>
+            <div className="text-xs text-gray-500">{s.label}</div>
+          </div>
+        ))}
+      </div>
 
-      <Card className="bg-white/80 backdrop-blur-xl rounded-3xl border-0 shadow-2xl">
-        <CardHeader>
-          <CardTitle>Inventaire</CardTitle>
-          <CardDescription>{loading ? 'Chargement…' : `${items.length} élément(s)`}</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {/* Filtres + recherche */}
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-4">
-            <Input placeholder="Recherche (nom, description, lieu, QR)" value={searchTerm} onChange={(e)=>setSearchTerm(e.target.value)} className="rounded-xl" />
-            <div>
-              <Select value={filterCategory} onValueChange={setFilterCategory}>
-                <SelectTrigger className="rounded-xl"><SelectValue placeholder="Catégorie" /></SelectTrigger>
-                <SelectContent>
-                  {['ALL','TOOL','SAFETY','MEASUREMENT','VEHICLE','EQUIPMENT','CONSUMABLE'].map(opt=> (
-                    <SelectItem key={opt} value={opt}>{opt}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div>
-              <Select value={filterAvailability} onValueChange={setFilterAvailability}>
-                <SelectTrigger className="rounded-xl"><SelectValue placeholder="Disponibilité" /></SelectTrigger>
-                <SelectContent>
-                  {['ALL','AVAILABLE','IN_USE'].map(opt=> (
-                    <SelectItem key={opt} value={opt}>{opt}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+      {/* Onglets principaux */}
+      <Tabs value={activeTab} onValueChange={setActiveTab}>
+        <TabsList className="bg-gray-100 rounded-2xl p-1">
+          <TabsTrigger value="inventory" className="rounded-xl data-[state=active]:bg-white data-[state=active]:shadow-sm">
+            <Package className="h-4 w-4 mr-2" />Inventaire
+          </TabsTrigger>
+          <TabsTrigger value="form" className="rounded-xl data-[state=active]:bg-white data-[state=active]:shadow-sm">
+            <Plus className="h-4 w-4 mr-2" />{form.id ? 'Modifier' : 'Ajouter'}
+          </TabsTrigger>
+          <TabsTrigger value="scan" className="rounded-xl data-[state=active]:bg-white data-[state=active]:shadow-sm">
+            <Camera className="h-4 w-4 mr-2" />Scanner QR
+          </TabsTrigger>
+        </TabsList>
+
+        {/* ONGLET INVENTAIRE */}
+        <TabsContent value="inventory" className="mt-4 space-y-4">
+          {/* Filtres */}
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+            <Input placeholder="🔍 Rechercher (nom, série, marque, QR...)" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="rounded-xl" />
+            <Select value={filterCategory} onValueChange={setFilterCategory}>
+              <SelectTrigger className="rounded-xl"><SelectValue placeholder="Catégorie" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ALL">Toutes catégories</SelectItem>
+                {CATEGORIES.map(c => <SelectItem key={c.value} value={c.value}>{c.icon} {c.label}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <Select value={filterCondition} onValueChange={setFilterCondition}>
+              <SelectTrigger className="rounded-xl"><SelectValue placeholder="État" /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ALL">Tous états</SelectItem>
+                {CONDITIONS.map(c => <SelectItem key={c.value} value={c.value}>{c.label}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <div className="flex items-center text-sm text-gray-500">
+              {filteredItems.length} résultat{filteredItems.length !== 1 ? 's' : ''}
             </div>
           </div>
-          <div className="overflow-x-auto -mx-2">
-            <table className="min-w-full text-sm">
-              <thead>
-                <tr className="text-left text-gray-500">
-                  <th className="px-2 py-2">Nom</th>
-                  <th className="px-2 py-2">Catégorie</th>
-                  <th className="px-2 py-2">Localisation</th>
-                  <th className="px-2 py-2">Statut</th>
-                  <th className="px-2 py-2">QR</th>
-                  <th className="px-2 py-2">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredItems?.map((m) => (
-                  <tr key={m.id} className="border-t border-gray-100">
-                    <td className="px-2 py-2 font-medium">{m.name}</td>
-                    <td className="px-2 py-2">{m.category || '-'}</td>
-                    <td className="px-2 py-2">{m.location || '-'}</td>
-                    <td className="px-2 py-2">{
-                      m.assigned_to
-                        ? 'En utilisation'
-                        : ((m.status === 'AVAILABLE') ? 'Disponible' : (m.status === 'IN_USE' ? 'En utilisation' : (m.status || 'Disponible')))
-                    }</td>
-                    <td className="px-2 py-2 font-mono text-xs">{m.qr_code}</td>
-                    <td className="px-2 py-2 space-x-2">
-                      <Button size="sm" variant="outline" onClick={()=>onEdit(m)} className="rounded-xl"><Edit className="h-4 w-4"/></Button>
-                      {me && (!m.assigned_to || m.assigned_to === null) && (
-                        <Button size="sm" variant="outline" onClick={()=>onAssignToMe(m)} className="rounded-xl"><User className="h-4 w-4 mr-1"/>Prendre</Button>
+
+          {/* Grille de cartes */}
+          {loading ? (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="h-8 w-8 animate-spin text-blue-500" />
+            </div>
+          ) : filteredItems.length === 0 ? (
+            <div className="text-center py-12 text-gray-400">
+              <Package className="h-12 w-12 mx-auto mb-3 opacity-40" />
+              <p className="text-lg font-medium">Aucun matériel</p>
+              <p className="text-sm">Ajoutez votre premier équipement via l'onglet "Ajouter"</p>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {filteredItems.map((m) => {
+                const condInfo = getConditionInfo(m.condition || 'BON')
+                const catInfo = getCategoryInfo(m.category)
+                const maintenanceDue = isMaintenanceDue(m)
+                const maintenanceSoon = isMaintenanceSoon(m)
+                const daysLeft = daysUntilMaintenance(m)
+
+                return (
+                  <div
+                    key={m.id}
+                    onClick={() => openDetail(m)}
+                    className={`bg-white rounded-2xl border-2 ${
+                      m.end_of_life || m.condition === 'FIN_DE_VIE' ? 'border-red-200 bg-red-50/30' :
+                      maintenanceDue ? 'border-purple-200 bg-purple-50/30' :
+                      maintenanceSoon ? 'border-amber-200 bg-amber-50/30' :
+                      'border-gray-100 hover:border-blue-200'
+                    } shadow-sm hover:shadow-lg transition-all cursor-pointer p-4 relative`}
+                  >
+                    {/* Badge condition */}
+                    <div className="flex items-start justify-between mb-3">
+                      <div className="flex items-center gap-2">
+                        <span className="text-2xl">{catInfo.icon}</span>
+                        <div>
+                          <h3 className="font-semibold text-gray-900 leading-tight">{m.name}</h3>
+                          {(m.brand || m.model) && (
+                            <p className="text-xs text-gray-500">{[m.brand, m.model].filter(Boolean).join(' - ')}</p>
+                          )}
+                        </div>
+                      </div>
+                      <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${condInfo.color}`}>
+                        {condInfo.label}
+                      </span>
+                    </div>
+
+                    {/* Détails */}
+                    <div className="space-y-1 text-sm text-gray-600">
+                      {m.serial_number && (
+                        <div className="flex items-center gap-1">
+                          <span className="text-gray-400">N° série:</span>
+                          <span className="font-mono text-xs">{m.serial_number}</span>
+                        </div>
                       )}
-                      {me && m.assigned_to === me?.id && (
-                        <Button size="sm" variant="outline" onClick={()=>onReturn(m)} className="rounded-xl"><Check className="h-4 w-4 mr-1"/>Rendre</Button>
+                      {m.location && (
+                        <div className="flex items-center gap-1">
+                          <MapPin className="h-3 w-3 text-gray-400" />
+                          <span>{m.location}</span>
+                        </div>
                       )}
-                      <Button size="sm" variant="outline" onClick={()=>setDeleteItem(m)} className="rounded-xl text-red-600"><Trash2 className="h-4 w-4"/></Button>
-                    </td>
-                  </tr>
-                ))}
-                {!loading && filteredItems?.length === 0 && (
-                  <tr>
-                    <td colSpan={6} className="px-2 py-6 text-center text-gray-500">Aucun matériel pour l’instant.</td>
-                  </tr>
+                    </div>
+
+                    {/* Alertes */}
+                    <div className="flex flex-wrap gap-1.5 mt-3">
+                      {(m.end_of_life || m.condition === 'FIN_DE_VIE') && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-700">
+                          <AlertTriangle className="h-3 w-3" /> Fin de vie
+                        </span>
+                      )}
+                      {maintenanceDue && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-700">
+                          <Wrench className="h-3 w-3" /> Entretien en retard
+                        </span>
+                      )}
+                      {maintenanceSoon && !maintenanceDue && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-700">
+                          <Clock className="h-3 w-3" /> Entretien dans {daysLeft}j
+                        </span>
+                      )}
+                      {m.assigned_to && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700">
+                          <User className="h-3 w-3" /> Assigné
+                        </span>
+                      )}
+                    </div>
+
+                    {/* QR mini */}
+                    <div className="absolute bottom-3 right-3">
+                      <img
+                        src={`https://api.qrserver.com/v1/create-qr-code/?size=50x50&data=${encodeURIComponent(m.qr_code)}`}
+                        alt="QR"
+                        className="w-10 h-10 rounded opacity-50 hover:opacity-100 transition-opacity"
+                      />
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
+        </TabsContent>
+
+        {/* ONGLET FORMULAIRE */}
+        <TabsContent value="form" className="mt-4">
+          <Card className="bg-white/80 backdrop-blur-xl rounded-3xl border-0 shadow-2xl">
+            <CardHeader>
+              <CardTitle>{form.id ? '✏️ Modifier l\'équipement' : '➕ Nouvel équipement'}</CardTitle>
+              <CardDescription>Renseignez les informations de l'équipement. Un QR code unique sera généré automatiquement.</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form onSubmit={onSubmit} className="space-y-4">
+                {/* Ligne 1: Nom + Marque + Modèle */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 mb-1 block">Nom de l'équipement *</label>
+                    <Input placeholder="ex: Treuil hydraulique" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required className="rounded-xl" />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 mb-1 block">Marque</label>
+                    <Input placeholder="ex: Bosch" value={form.brand} onChange={(e) => setForm({ ...form, brand: e.target.value })} className="rounded-xl" />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 mb-1 block">Modèle</label>
+                    <Input placeholder="ex: GBH 2-26" value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} className="rounded-xl" />
+                  </div>
+                </div>
+
+                {/* Ligne 2: N° série + Catégorie + État */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 mb-1 block">N° de série</label>
+                    <Input placeholder="ex: SN-2024-0042" value={form.serial_number} onChange={(e) => setForm({ ...form, serial_number: e.target.value })} className="rounded-xl font-mono" />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 mb-1 block">Catégorie</label>
+                    <Select value={form.category} onValueChange={(v) => setForm({ ...form, category: v })}>
+                      <SelectTrigger className="rounded-xl"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {CATEGORIES.map(c => <SelectItem key={c.value} value={c.value}>{c.icon} {c.label}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 mb-1 block">État</label>
+                    <Select value={form.condition} onValueChange={(v) => setForm({ ...form, condition: v })}>
+                      <SelectTrigger className="rounded-xl"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {CONDITIONS.map(c => <SelectItem key={c.value} value={c.value}>{c.label}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                </div>
+
+                {/* Ligne 3: Localisation + Date achat + Fin garantie */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 mb-1 block">Localisation / Dépôt</label>
+                    <Input placeholder="ex: Entrepôt Nord" value={form.location} onChange={(e) => setForm({ ...form, location: e.target.value })} className="rounded-xl" />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 mb-1 block">Date d'achat</label>
+                    <Input type="date" value={form.purchase_date} onChange={(e) => setForm({ ...form, purchase_date: e.target.value })} className="rounded-xl" />
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 mb-1 block">Fin de garantie</label>
+                    <Input type="date" value={form.warranty_end} onChange={(e) => setForm({ ...form, warranty_end: e.target.value })} className="rounded-xl" />
+                  </div>
+                </div>
+
+                {/* Ligne 4: Intervalle maintenance + Description */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 mb-1 block">Intervalle entretien (jours)</label>
+                    <Input type="number" placeholder="ex: 90" value={form.maintenance_interval_days} onChange={(e) => setForm({ ...form, maintenance_interval_days: e.target.value })} className="rounded-xl" />
+                  </div>
+                  <div className="md:col-span-2">
+                    <label className="text-xs font-medium text-gray-500 mb-1 block">Description</label>
+                    <Input placeholder="Description de l'équipement..." value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className="rounded-xl" />
+                  </div>
+                </div>
+
+                {/* Notes */}
+                <div>
+                  <label className="text-xs font-medium text-gray-500 mb-1 block">Notes internes</label>
+                  <textarea
+                    placeholder="Notes supplémentaires..."
+                    value={form.notes}
+                    onChange={(e) => setForm({ ...form, notes: e.target.value })}
+                    className="w-full rounded-xl border border-gray-200 p-3 text-sm resize-none h-20 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+
+                {/* Boutons */}
+                <div className="flex gap-2 pt-2">
+                  <Button type="submit" disabled={saving} className="rounded-xl bg-blue-600 hover:bg-blue-700">
+                    {saving ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <Save className="h-4 w-4 mr-2" />}
+                    {form.id ? 'Mettre à jour' : 'Enregistrer l\'équipement'}
+                  </Button>
+                  {form.id && (
+                    <Button type="button" variant="outline" onClick={() => { resetForm(); setActiveTab('inventory') }} className="rounded-xl">Annuler</Button>
+                  )}
+                </div>
+              </form>
+
+              {/* Aperçu QR après enregistrement */}
+              {qrPreviewUrl && (
+                <div className="mt-6 p-4 bg-gray-50 rounded-2xl flex items-center gap-4">
+                  <img src={qrPreviewUrl} alt="QR Code" className="w-32 h-32 rounded-xl border" />
+                  <div>
+                    <p className="font-medium text-gray-800">QR Code généré ✅</p>
+                    <p className="text-sm text-gray-500 mb-2">Imprimez et collez ce QR sur l'équipement.</p>
+                    <a href={qrPreviewUrl} download={`qr_${Date.now()}.png`} className="text-blue-600 underline text-sm">📥 Télécharger l'image QR</a>
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* ONGLET SCANNER */}
+        <TabsContent value="scan" className="mt-4">
+          <Card className="bg-white/80 backdrop-blur-xl rounded-3xl border-0 shadow-2xl">
+            <CardHeader>
+              <CardTitle>📸 Scanner un QR Code</CardTitle>
+              <CardDescription>Scannez le QR code collé sur un équipement pour accéder à sa fiche complète.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="flex gap-3">
+                <Button onClick={scanning ? stopScan : startScan} className="rounded-xl" variant={scanning ? 'destructive' : 'default'}>
+                  <Camera className="h-4 w-4 mr-2" />{scanning ? 'Arrêter le scan' : 'Ouvrir la caméra'}
+                </Button>
+              </div>
+              {scanning && (
+                <div className="space-y-2">
+                  <video ref={videoRef} className="w-full max-w-md rounded-2xl border-2 border-blue-200" muted playsInline />
+                  <p className="text-sm text-gray-500 animate-pulse">🔍 Recherche d'un QR code...</p>
+                  {!('BarcodeDetector' in window) && (
+                    <div className="text-xs text-amber-600 bg-amber-50 p-2 rounded-xl">
+                      ⚠️ Votre navigateur ne supporte pas la détection automatique. Utilisez Chrome ou Edge.
+                    </div>
+                  )}
+                </div>
+              )}
+              {scanResult && (
+                <div className="p-3 bg-green-50 rounded-xl border border-green-200 text-sm">
+                  ✅ Code détecté: <span className="font-mono font-medium">{scanResult}</span>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+
+      {/* PANNEAU DÉTAIL D'UN ÉQUIPEMENT */}
+      {selectedItem && (
+        <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/50 p-4 pt-10 pb-10">
+          <div className="bg-white rounded-3xl shadow-2xl w-full max-w-3xl relative">
+            {/* Bouton fermer */}
+            <button onClick={closeDetail} className="absolute top-4 right-4 p-2 rounded-full hover:bg-gray-100 z-10">
+              <X className="h-5 w-5 text-gray-400" />
+            </button>
+
+            {/* En-tête fiche */}
+            <div className={`p-6 rounded-t-3xl ${
+              selectedItem.condition === 'FIN_DE_VIE' ? 'bg-gradient-to-r from-red-50 to-red-100' :
+              selectedItem.condition === 'A_REVISER' ? 'bg-gradient-to-r from-orange-50 to-orange-100' :
+              selectedItem.condition === 'NEUF' ? 'bg-gradient-to-r from-emerald-50 to-emerald-100' :
+              'bg-gradient-to-r from-blue-50 to-blue-100'
+            }`}>
+              <div className="flex items-start justify-between pr-8">
+                <div className="flex items-center gap-3">
+                  <span className="text-3xl">{getCategoryInfo(selectedItem.category).icon}</span>
+                  <div>
+                    <h2 className="text-xl font-bold text-gray-900">{selectedItem.name}</h2>
+                    <p className="text-sm text-gray-500">
+                      {[selectedItem.brand, selectedItem.model].filter(Boolean).join(' — ') || selectedItem.category}
+                    </p>
+                  </div>
+                </div>
+                <span className={`px-3 py-1 rounded-full text-sm font-medium ${getConditionInfo(selectedItem.condition || 'BON').color}`}>
+                  {getConditionInfo(selectedItem.condition || 'BON').label}
+                </span>
+              </div>
+
+              {/* Alertes */}
+              {(selectedItem.end_of_life || selectedItem.condition === 'FIN_DE_VIE') && (
+                <div className="mt-3 p-3 bg-red-100 rounded-xl flex items-center gap-2 text-red-800 text-sm font-medium">
+                  <AlertTriangle className="h-5 w-5" />
+                  Cet équipement est en fin de vie et doit être remplacé.
+                </div>
+              )}
+              {isMaintenanceDue(selectedItem) && (
+                <div className="mt-3 p-3 bg-purple-100 rounded-xl flex items-center gap-2 text-purple-800 text-sm font-medium">
+                  <Wrench className="h-5 w-5" />
+                  L'entretien de cet équipement est en retard ! Prévu le {new Date(selectedItem.next_maintenance_date).toLocaleDateString('fr-FR')}
+                </div>
+              )}
+            </div>
+
+            {/* Corps */}
+            <div className="p-6 space-y-6">
+              {/* Infos détaillées + QR Code */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div className="md:col-span-2">
+                  <h3 className="font-semibold text-gray-800 mb-3 flex items-center gap-2"><Info className="h-4 w-4" /> Informations</h3>
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    {selectedItem.serial_number && (
+                      <div><span className="text-gray-400">N° série</span><div className="font-mono font-medium">{selectedItem.serial_number}</div></div>
+                    )}
+                    {selectedItem.location && (
+                      <div><span className="text-gray-400">Localisation</span><div>{selectedItem.location}</div></div>
+                    )}
+                    {selectedItem.purchase_date && (
+                      <div><span className="text-gray-400">Date d'achat</span><div>{new Date(selectedItem.purchase_date).toLocaleDateString('fr-FR')}</div></div>
+                    )}
+                    {selectedItem.warranty_end && (
+                      <div>
+                        <span className="text-gray-400">Fin de garantie</span>
+                        <div className={new Date(selectedItem.warranty_end) < new Date() ? 'text-red-600' : 'text-green-600'}>
+                          {new Date(selectedItem.warranty_end).toLocaleDateString('fr-FR')}
+                          {new Date(selectedItem.warranty_end) < new Date() ? ' (expirée)' : ' ✓'}
+                        </div>
+                      </div>
+                    )}
+                    {selectedItem.maintenance_interval_days && (
+                      <div><span className="text-gray-400">Intervalle entretien</span><div>Tous les {selectedItem.maintenance_interval_days} jours</div></div>
+                    )}
+                    {selectedItem.last_maintenance_date && (
+                      <div><span className="text-gray-400">Dernier entretien</span><div>{new Date(selectedItem.last_maintenance_date).toLocaleDateString('fr-FR')}</div></div>
+                    )}
+                    {selectedItem.next_maintenance_date && (
+                      <div>
+                        <span className="text-gray-400">Prochain entretien</span>
+                        <div className={isMaintenanceDue(selectedItem) ? 'text-red-600 font-medium' : isMaintenanceSoon(selectedItem) ? 'text-amber-600' : ''}>
+                          {new Date(selectedItem.next_maintenance_date).toLocaleDateString('fr-FR')}
+                          {isMaintenanceDue(selectedItem) && ' ⚠️ en retard'}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  {selectedItem.description && (
+                    <div className="mt-3 text-sm text-gray-600">{selectedItem.description}</div>
+                  )}
+                  {selectedItem.notes && (
+                    <div className="mt-2 p-2 bg-yellow-50 rounded-xl text-sm text-yellow-800">📝 {selectedItem.notes}</div>
+                  )}
+                </div>
+
+                {/* QR Code grand format */}
+                <div className="flex flex-col items-center justify-start">
+                  <img
+                    src={`https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(selectedItem.qr_code)}`}
+                    alt="QR Code"
+                    className="w-40 h-40 rounded-xl border"
+                  />
+                  <p className="text-xs font-mono text-gray-400 mt-2 text-center break-all">{selectedItem.qr_code}</p>
+                  <a
+                    href={`https://api.qrserver.com/v1/create-qr-code/?size=400x400&data=${encodeURIComponent(selectedItem.qr_code)}`}
+                    download={`qr_${selectedItem.name}.png`}
+                    className="text-blue-600 underline text-xs mt-1"
+                  >📥 Télécharger</a>
+                </div>
+              </div>
+
+              {/* Historique de maintenance */}
+              <div>
+                <h3 className="font-semibold text-gray-800 mb-3 flex items-center gap-2">
+                  <History className="h-4 w-4" /> Historique de maintenance
+                  <span className="text-xs font-normal text-gray-400">({maintenanceLogs.length} entrée{maintenanceLogs.length !== 1 ? 's' : ''})</span>
+                </h3>
+
+                {/* Formulaire ajout maintenance */}
+                <form onSubmit={onSubmitMaintenance} className="p-4 bg-gray-50 rounded-2xl mb-4 space-y-3">
+                  <p className="text-sm font-medium text-gray-700">➕ Enregistrer un entretien</p>
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                    <Select value={maintenanceForm.maintenance_type} onValueChange={(v) => setMaintenanceForm({ ...maintenanceForm, maintenance_type: v })}>
+                      <SelectTrigger className="rounded-xl"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        {MAINTENANCE_TYPES.map(t => <SelectItem key={t.value} value={t.value}>{t.icon} {t.label}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                    <Input type="date" value={maintenanceForm.performed_at} onChange={(e) => setMaintenanceForm({ ...maintenanceForm, performed_at: e.target.value })} className="rounded-xl" />
+                    <Input type="number" step="0.01" placeholder="Coût (€)" value={maintenanceForm.cost} onChange={(e) => setMaintenanceForm({ ...maintenanceForm, cost: e.target.value })} className="rounded-xl" />
+                    <Input type="date" placeholder="Prochain entretien" value={maintenanceForm.next_due_date} onChange={(e) => setMaintenanceForm({ ...maintenanceForm, next_due_date: e.target.value })} className="rounded-xl" title="Date du prochain entretien" />
+                  </div>
+                  <Input placeholder="Description de l'intervention..." value={maintenanceForm.description} onChange={(e) => setMaintenanceForm({ ...maintenanceForm, description: e.target.value })} className="rounded-xl" />
+                  <Button type="submit" disabled={savingMaintenance} size="sm" className="rounded-xl">
+                    {savingMaintenance ? <Loader2 className="h-4 w-4 animate-spin mr-1" /> : <Wrench className="h-4 w-4 mr-1" />}
+                    Enregistrer l'entretien
+                  </Button>
+                </form>
+
+                {/* Timeline de maintenance */}
+                {logsLoading ? (
+                  <div className="flex justify-center py-4"><Loader2 className="h-5 w-5 animate-spin text-blue-500" /></div>
+                ) : maintenanceLogs.length === 0 ? (
+                  <p className="text-sm text-gray-400 text-center py-4">Aucun entretien enregistré pour cet équipement.</p>
+                ) : (
+                  <div className="space-y-3">
+                    {maintenanceLogs.map((log, i) => {
+                      const typeInfo = getMaintenanceTypeInfo(log.maintenance_type)
+                      return (
+                        <div key={log.id || i} className="flex gap-3 items-start group">
+                          <div className="flex flex-col items-center">
+                            <div className="w-8 h-8 rounded-full bg-blue-100 flex items-center justify-center text-sm">{typeInfo.icon}</div>
+                            {i < maintenanceLogs.length - 1 && <div className="w-0.5 h-full bg-gray-200 mt-1" />}
+                          </div>
+                          <div className="flex-1 pb-4">
+                            <div className="flex items-center justify-between">
+                              <span className="font-medium text-sm text-gray-800">{typeInfo.label}</span>
+                              <span className="text-xs text-gray-400">
+                                {log.performed_at ? new Date(log.performed_at).toLocaleDateString('fr-FR') : ''}
+                              </span>
+                            </div>
+                            {log.description && <p className="text-sm text-gray-600 mt-0.5">{log.description}</p>}
+                            <div className="flex gap-3 mt-1 text-xs text-gray-400">
+                              {log.cost && <span>💰 {parseFloat(log.cost).toFixed(2)} €</span>}
+                              {log.users && <span>👤 {log.users.prenom} {log.users.nom}</span>}
+                              {log.next_due_date && <span>📅 Prochain: {new Date(log.next_due_date).toLocaleDateString('fr-FR')}</span>}
+                            </div>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
                 )}
-              </tbody>
-            </table>
+              </div>
+
+              {/* Boutons d'action */}
+              <div className="flex gap-2 pt-2 border-t border-gray-100">
+                <Button onClick={() => onEdit(selectedItem)} className="rounded-xl" variant="outline">
+                  <Edit className="h-4 w-4 mr-2" /> Modifier
+                </Button>
+                {me && !selectedItem.assigned_to && (
+                  <Button onClick={async () => {
+                    const updates = { assigned_to: me.id, assigned_date: new Date().toISOString(), status: 'IN_USE' }
+                    await api.materials.update(selectedItem.id, updates)
+                    const refreshed = { ...selectedItem, ...updates }
+                    setSelectedItem(refreshed)
+                    load()
+                  }} className="rounded-xl" variant="outline">
+                    <User className="h-4 w-4 mr-2" /> Prendre
+                  </Button>
+                )}
+                {me && selectedItem.assigned_to === me?.id && (
+                  <Button onClick={async () => {
+                    const updates = { assigned_to: null, assigned_date: null, status: 'DISPONIBLE' }
+                    await api.materials.update(selectedItem.id, updates)
+                    const refreshed = { ...selectedItem, ...updates }
+                    setSelectedItem(refreshed)
+                    load()
+                  }} className="rounded-xl" variant="outline">
+                    <Check className="h-4 w-4 mr-2" /> Rendre
+                  </Button>
+                )}
+                <Button onClick={() => { setDeleteItem(selectedItem); closeDetail() }} className="rounded-xl text-red-600" variant="outline">
+                  <Trash2 className="h-4 w-4 mr-2" /> Supprimer
+                </Button>
+              </div>
+            </div>
           </div>
-          
-        </CardContent>
-      </Card>
-      {/* Confirmation de suppression (inline overlay, pas de portail) */}
+        </div>
+      )}
+
+      {/* Erreur */}
+      {error && (
+        <div className="fixed bottom-4 right-4 z-50 bg-red-100 text-red-700 px-4 py-2 rounded-xl shadow-lg text-sm flex items-center gap-2">
+          <AlertTriangle className="h-4 w-4" /> {error}
+          <button onClick={() => setError('')} className="ml-2 hover:text-red-900"><X className="h-3 w-3" /></button>
+        </div>
+      )}
+
+      {/* Confirmation de suppression */}
       {deleteItem && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
           <div className="bg-white rounded-2xl shadow-2xl p-6 w-[90%] max-w-sm">
-            <div className="text-lg font-semibold mb-2">Supprimer ce matériel ?</div>
-            <div className="text-sm text-gray-600 mb-4">Cette action est irréversible. Matériel: <strong>{deleteItem.name}</strong></div>
+            <div className="text-lg font-semibold mb-2">🗑️ Supprimer ce matériel ?</div>
+            <div className="text-sm text-gray-600 mb-4">
+              Cette action est irréversible.<br />
+              Matériel: <strong>{deleteItem.name}</strong>
+              {deleteItem.serial_number && <span className="text-gray-400"> (SN: {deleteItem.serial_number})</span>}
+            </div>
             <div className="flex justify-end gap-2">
-              <Button variant="outline" onClick={()=>setDeleteItem(null)} className="rounded-xl">Annuler</Button>
-              <Button variant="destructive" onClick={onDeleteConfirmed} className="rounded-xl">Supprimer</Button>
+              <Button variant="outline" onClick={() => setDeleteItem(null)} className="rounded-xl">Annuler</Button>
+              <Button variant="destructive" onClick={onDeleteConfirmed} className="rounded-xl">Supprimer définitivement</Button>
             </div>
           </div>
         </div>
@@ -11971,23 +18219,34 @@ const MaterialManagement = () => {
     </div>
   )
 }
-
 // Apple-style Bureau Layout Component with Back Button
 const BureauLayout = () => {
   const navigate = useNavigate();
   const location = useLocation();
+  const [user, setUser] = useState(null);
+
+  // Charger les données utilisateur depuis localStorage
+  useEffect(() => {
+    const userData = localStorage.getItem('user');
+    if (userData) {
+      setUser(JSON.parse(userData));
+    }
+  }, []);
   
   // Déterminer l'onglet actif depuis l'URL
   const getActiveTab = () => {
     const path = location.pathname;
+    if (path.includes('/projets') || path.includes('/entreprise')) return 'projects';
     if (path.includes('/devis')) return 'quotes';
     if (path.includes('/planning')) return 'planning';
-    if (path.includes('/chantiers')) return 'worksites';
+    if (path.includes('/chantiers')) return 'sites';
+    if (path.includes('/facturation')) return 'invoices';
     if (path.includes('/clients')) return 'clients';
     if (path.includes('/catalogue')) return 'catalog';
     if (path.includes('/invitations')) return 'invitations';
     if (path.includes('/materiel')) return 'material';
-    return 'quotes'; // Par défaut
+    if (path.includes('/inventaire')) return 'inventory';
+    return 'projects'; // Par défaut: Mon Entreprise
   };
   
   const activeTab = getActiveTab();
@@ -11995,15 +18254,18 @@ const BureauLayout = () => {
   // Naviguer vers une route spécifique
   const handleTabChange = (newTab) => {
     const routes = {
+      'projects': '/bureau/projets',
       'quotes': '/bureau/devis',
       'planning': '/bureau/planning',
-      'worksites': '/bureau/chantiers',
+      'sites': '/bureau/chantiers',
+      'invoices': '/bureau/facturation',
       'clients': '/bureau/clients',
       'catalog': '/bureau/catalogue',
       'invitations': '/bureau/invitations',
-      'material': '/bureau/materiel'
+      'material': '/bureau/materiel',
+      'inventory': '/bureau/inventaire'
     };
-    navigate(routes[newTab] || '/bureau/devis');
+    navigate(routes[newTab] || '/bureau/projets');
   };
 
   const handleLogout = () => {
@@ -12019,30 +18281,36 @@ const BureauLayout = () => {
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Apple-style Navigation with Back Button */}
-      <nav className="bg-white border-b border-gray-200">
+      <nav className="bg-white border-b border-gray-200 shadow-sm">
         <div className="max-w-7xl mx-auto px-6">
-          <div className="flex justify-between items-center h-16">
-            <div className="flex items-center">
+          <div className="flex justify-between items-center h-20 py-3">
+            <div className="flex items-center space-x-4">
               <button
                 onClick={goBack}
-                className="mr-4 p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-colors duration-200"
+                className="p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200"
               >
                 <ArrowLeft className="h-5 w-5" />
               </button>
               <img 
                 src="/logo.png" 
                 alt="SkyApp Logo" 
-                className="w-48 h-48 rounded-lg object-cover logo-neon-effect"
+                className="w-16 h-16 rounded-lg object-cover logo-neon-stable"
               />
+              <div className="h-8 w-px bg-gray-300"></div>
+              <div>
+                <p className="text-sm font-semibold text-gray-900">{user?.name || user?.email}</p>
+                <p className="text-xs text-gray-500">{user?.role === 'ADMIN' ? 'Administrateur' : user?.role === 'BUREAU' ? 'Bureau' : 'Technicien'}</p>
+              </div>
             </div>
             
-            <div className="flex items-center space-x-4">
+            <div className="flex items-center space-x-2">
               <Button
                 onClick={handleLogout}
                 variant="ghost"
-                className="text-gray-500 hover:text-gray-700 p-2"
+                className="text-gray-500 hover:text-red-600 hover:bg-red-50 transition-all duration-200 flex items-center space-x-2"
               >
                 <LogOut className="h-4 w-4" />
+                <span className="text-sm font-medium">Déconnexion</span>
               </Button>
             </div>
           </div>
@@ -12053,61 +18321,79 @@ const BureauLayout = () => {
       <main className="max-w-7xl mx-auto py-8 px-6">
         <Tabs value={activeTab} onValueChange={handleTabChange}>
           {/* Apple-style Tab Navigation */}
-          <div className="flex justify-center mb-8 overflow-x-auto">
-            <TabsList className="bg-white border border-gray-200 p-1 rounded-xl shadow-sm inline-flex min-w-max">
+          <div className="flex justify-center mb-8 overflow-x-auto overflow-y-visible py-2">
+            <TabsList className="bg-gradient-to-r from-gray-50 to-gray-100 border-2 border-gray-200 p-1.5 rounded-2xl shadow-lg inline-flex min-w-max">
+              <TabsTrigger 
+                value="projects" 
+                className="flex items-center space-x-2 px-5 py-3 rounded-xl data-[state=active]:bg-white data-[state=active]:shadow-md data-[state=active]:text-blue-600 transition-all duration-200 whitespace-nowrap hover:bg-white/50"
+              >
+                <Briefcase className="h-4 w-4" />
+                <span className="font-semibold">Mon Entreprise</span>
+              </TabsTrigger>
               <TabsTrigger 
                 value="quotes" 
-                className="flex items-center space-x-2 px-4 py-3 rounded-lg data-[state=active]:bg-gray-100 data-[state=active]:shadow-sm transition-all duration-200 whitespace-nowrap"
+                className="flex items-center space-x-2 px-5 py-3 rounded-xl data-[state=active]:bg-white data-[state=active]:shadow-md data-[state=active]:text-blue-600 transition-all duration-200 whitespace-nowrap hover:bg-white/50"
               >
                 <Calculator className="h-4 w-4" />
-                <span className="font-medium">Devis</span>
+                <span className="font-semibold">Devis</span>
               </TabsTrigger>
               <TabsTrigger 
                 value="planning" 
-                className="flex items-center space-x-2 px-4 py-3 rounded-lg data-[state=active]:bg-gray-100 data-[state=active]:shadow-sm transition-all duration-200 whitespace-nowrap"
+                className="flex items-center space-x-2 px-5 py-3 rounded-xl data-[state=active]:bg-white data-[state=active]:shadow-md data-[state=active]:text-blue-600 transition-all duration-200 whitespace-nowrap hover:bg-white/50"
               >
                 <Calendar className="h-4 w-4" />
-                <span className="font-medium">Planning</span>
+                <span className="font-semibold">Planning</span>
               </TabsTrigger>
               <TabsTrigger 
                 value="sites" 
-                className="flex items-center space-x-2 px-4 py-3 rounded-lg data-[state=active]:bg-gray-100 data-[state=active]:shadow-sm transition-all duration-200 whitespace-nowrap"
+                className="flex items-center space-x-2 px-5 py-3 rounded-xl data-[state=active]:bg-white data-[state=active]:shadow-md data-[state=active]:text-blue-600 transition-all duration-200 whitespace-nowrap hover:bg-white/50"
               >
                 <Building className="h-4 w-4" />
-                <span className="font-medium">Chantiers</span>
+                <span className="font-semibold">Chantiers</span>
+              </TabsTrigger>
+              <TabsTrigger 
+                value="invoices" 
+                className="flex items-center space-x-2 px-5 py-3 rounded-xl data-[state=active]:bg-white data-[state=active]:shadow-md data-[state=active]:text-blue-600 transition-all duration-200 whitespace-nowrap hover:bg-white/50"
+              >
+                <FileText className="h-4 w-4" />
+                <span className="font-semibold">Facturation</span>
               </TabsTrigger>
               <TabsTrigger 
                 value="clients" 
-                className="flex items-center space-x-2 px-4 py-3 rounded-lg data-[state=active]:bg-gray-100 data-[state=active]:shadow-sm transition-all duration-200 whitespace-nowrap"
+                className="flex items-center space-x-2 px-5 py-3 rounded-xl data-[state=active]:bg-white data-[state=active]:shadow-md data-[state=active]:text-blue-600 transition-all duration-200 whitespace-nowrap hover:bg-white/50"
               >
                 <Users className="h-4 w-4" />
-                <span className="font-medium">Clients</span>
+                <span className="font-semibold">Clients</span>
               </TabsTrigger>
               <TabsTrigger 
                 value="catalog" 
-                className="flex items-center space-x-2 px-4 py-3 rounded-lg data-[state=active]:bg-gray-100 data-[state=active]:shadow-sm transition-all duration-200 whitespace-nowrap"
+                className="flex items-center space-x-2 px-5 py-3 rounded-xl data-[state=active]:bg-white data-[state=active]:shadow-md data-[state=active]:text-blue-600 transition-all duration-200 whitespace-nowrap hover:bg-white/50"
               >
                 <ClipboardList className="h-4 w-4" />
-                <span className="font-medium">Catalogue</span>
+                <span className="font-semibold">Catalogue</span>
               </TabsTrigger>
               <TabsTrigger 
-                value="invites" 
-                className="flex items-center space-x-2 px-4 py-3 rounded-lg data-[state=active]:bg-gray-100 data-[state=active]:shadow-sm transition-all duration-200 whitespace-nowrap"
+                value="invitations" 
+                className="flex items-center space-x-2 px-5 py-3 rounded-xl data-[state=active]:bg-white data-[state=active]:shadow-md data-[state=active]:text-blue-600 transition-all duration-200 whitespace-nowrap hover:bg-white/50"
               >
                 <UserPlus className="h-4 w-4" />
-                <span className="font-medium">Invitations</span>
+                <span className="font-semibold">Invitations</span>
               </TabsTrigger>
               <TabsTrigger 
-                value="materials" 
-                className="flex items-center space-x-2 px-4 py-3 rounded-lg data-[state=active]:bg-gray-100 data-[state=active]:shadow-sm transition-all duration-200 whitespace-nowrap"
+                value="material" 
+                className="flex items-center space-x-2 px-5 py-3 rounded-xl data-[state=active]:bg-white data-[state=active]:shadow-md data-[state=active]:text-blue-600 transition-all duration-200 whitespace-nowrap hover:bg-white/50"
               >
                 <Settings className="h-4 w-4" />
-                <span className="font-medium">Matériel</span>
+                <span className="font-semibold">Matériel</span>
               </TabsTrigger>
             </TabsList>
           </div>
 
           {/* Onglet connexion supprimé pour les rôles non fondateur */}
+
+          <TabsContent value="projects" className="mt-8">
+            <ProjectsHub />
+          </TabsContent>
 
           <TabsContent value="quotes" className="mt-8">
             <QuoteCreate />
@@ -12118,7 +18404,11 @@ const BureauLayout = () => {
           </TabsContent>
 
           <TabsContent value="sites" className="mt-8">
-            <UpcomingSites />
+            <WorksitesManagement />
+          </TabsContent>
+
+          <TabsContent value="invoices" className="mt-8">
+            <InvoicingModule />
           </TabsContent>
 
           <TabsContent value="clients" className="mt-8">
@@ -12129,11 +18419,11 @@ const BureauLayout = () => {
             <CatalogManagement />
           </TabsContent>
 
-          <TabsContent value="invites" className="mt-8">
+          <TabsContent value="invitations" className="mt-8">
             <InviteManagementView />
           </TabsContent>
 
-          <TabsContent value="materials" className="mt-8">
+          <TabsContent value="material" className="mt-8">
             <MaterialManagement />
           </TabsContent>
         </Tabs>
@@ -12185,12 +18475,24 @@ const StatisticsLayout = () => {
     navigate('/role-selection');
   };
 
-  // Calculs avancés des KPI
-  const totalRevenue = stats.total_searches * 750 + (stats.total_companies || 0) * 1250;
-  const monthlyGrowth = Math.floor(Math.random() * 25) + 5;
-  const customerSatisfaction = 4.7;
-  const avgProjectDuration = 12.5;
-  const productivityIndex = Math.floor(Math.random() * 15) + 85;
+  // Calculs avancés des KPI avec vraies données
+  const totalRevenue = (stats.total_quotes_amount || 0);
+  const previousRevenue = (stats.previous_quotes_amount || totalRevenue * 0.85);
+  const monthlyGrowth = previousRevenue > 0 ? Math.round(((totalRevenue - previousRevenue) / previousRevenue) * 100) : 17;
+  const customerSatisfaction = stats.average_client_rating || 4.7;
+  const avgProjectDuration = stats.average_project_duration || 12.5;
+  const productivityIndex = stats.productivity_index || 98;
+  const totalProjects = stats.total_projects || stats.total_searches || 0;
+  const totalClients = stats.total_clients || 0;
+  const conversionRate = stats.quote_conversion_rate || 73;
+  const avgResponseTime = stats.average_response_time || '2.4h';
+  const retentionRate = stats.client_retention_rate || 87;
+  const avgMargin = stats.average_margin || 32;
+  const dailyInterventions = stats.daily_interventions || Math.round(totalProjects / 30) || 3.2;
+  const activeTeams = stats.active_teams || 12;
+  const coveredZones = stats.covered_zones || '8 régions';
+  const generatedReports = stats.generated_reports || totalProjects * 2;
+  const timeSaved = stats.time_saved || '42h/semaine';
 
   const StatCard = ({ title, value, change, icon: Icon, color, suffix = '', size = 'normal' }) => (
     <div className={`bg-white rounded-3xl border-0 shadow-lg p-6 hover:shadow-xl transition-all duration-300 ${size === 'large' ? 'md:col-span-2' : ''}`}>
@@ -12304,8 +18606,8 @@ const StatisticsLayout = () => {
           />
           <StatCard
             title="Projets Actifs"
-            value={stats.total_searches || 0}
-            change={12}
+            value={totalProjects}
+            change={stats.projects_growth || 12}
             icon={Briefcase}
             color="bg-gradient-to-br from-blue-500 to-blue-600"
           />
@@ -12313,7 +18615,7 @@ const StatisticsLayout = () => {
             title="Clients Satisfaits"
             value={customerSatisfaction}
             suffix="/5"
-            change={2}
+            change={stats.satisfaction_growth || 2}
             icon={Star}
             color="bg-gradient-to-br from-yellow-500 to-orange-500"
           />
@@ -12326,10 +18628,10 @@ const StatisticsLayout = () => {
             icon={Target}
             color="bg-gradient-to-br from-purple-500 to-purple-600"
             metrics={[
-              { label: 'Devis Convertis', value: '73%' },
-              { label: 'Temps Moyen Réponse', value: '2.4h' },
-              { label: 'Taux Fidélisation', value: '87%' },
-              { label: 'Marge Moyenne', value: '32%' }
+              { label: 'Devis Convertis', value: `${conversionRate}%` },
+              { label: 'Temps Moyen Réponse', value: avgResponseTime },
+              { label: 'Taux Fidélisation', value: `${retentionRate}%` },
+              { label: 'Marge Moyenne', value: `${avgMargin}%` }
             ]}
           />
           <MetricCard
@@ -12337,10 +18639,10 @@ const StatisticsLayout = () => {
             icon={MapPin}
             color="bg-gradient-to-br from-indigo-500 to-indigo-600"
             metrics={[
-              { label: 'Interventions/Jour', value: Math.floor(stats.total_searches / 30) || '3.2' },
+              { label: 'Interventions/Jour', value: typeof dailyInterventions === 'number' ? dailyInterventions.toFixed(1) : dailyInterventions },
               { label: 'Durée Moyenne Projet', value: `${avgProjectDuration}j` },
-              { label: 'Équipes Déployées', value: '12' },
-              { label: 'Zones Couvertes', value: '8 régions' }
+              { label: 'Équipes Déployées', value: activeTeams.toString() },
+              { label: 'Zones Couvertes', value: coveredZones }
             ]}
           />
           <MetricCard
@@ -12349,9 +18651,9 @@ const StatisticsLayout = () => {
             color="bg-gradient-to-br from-teal-500 to-teal-600"
             metrics={[
               { label: 'Index Productivité', value: `${productivityIndex}%` },
-              { label: 'Utilisateurs Actifs', value: activeUsers.toString() },
-              { label: 'Rapports Générés', value: (stats.total_searches * 2 || 14).toString() },
-              { label: 'Temps Économisé', value: '42h/semaine' }
+              { label: 'Utilisateurs Actifs', value: (stats.active_users || activeUsers).toString() },
+              { label: 'Rapports Générés', value: generatedReports.toString() },
+              { label: 'Temps Économisé', value: timeSaved }
             ]}
           />
         </div>
@@ -12484,15 +18786,27 @@ const LoginModal = ({ open, onClose }) => {
 
     try {
       const response = await axios.post(`${API}/auth/login`, { email, password });
-      const { token, user } = response.data;
+      const { token, access_token, refresh_token, user } = response.data;
       
-      // Stocker le token et l'utilisateur
-      localStorage.setItem('token', token);
+      // Stocker le token (privilégier access_token si disponible)
+      const finalToken = access_token || token;
+      localStorage.setItem('token', finalToken);
       localStorage.setItem('user', JSON.stringify(user));
+      
+      // Stocker le refresh_token pour rafraîchir la session plus tard
+      if (refresh_token) {
+        localStorage.setItem('refresh_token', refresh_token);
+      }
+
+      // Injecter la session Supabase Auth dans le client JS
+      // pour que les appels directs (materials, maintenance_logs) fonctionnent
+      if (access_token && refresh_token) {
+        await supabase.auth.setSession({ access_token, refresh_token });
+      }
       
       // L'intercepteur ajoutera automatiquement le token aux prochaines requêtes
       // mais on le met aussi dans les defaults pour garantir la compatibilité
-      axios.defaults.headers.common['Authorization'] = `Bearer ${token}`;
+      axios.defaults.headers.common['Authorization'] = `Bearer ${finalToken}`;
       
       // Sauvegarder l'email si "Se souvenir de moi" est coché
       if (rememberMe) {
@@ -12601,7 +18915,7 @@ const SupremeAdminLayout = () => {
     const userData = localStorage.getItem('user');
     if (userData) {
       const user = JSON.parse(userData);
-  if ((user.email || '').toLowerCase() !== FOUNDER_EMAIL) {
+      if (!user.is_fondateur) {
         navigate('/role-selection');
         return;
       }
@@ -13073,13 +19387,4803 @@ const SupremeAdminLayout = () => {
   );
 };
 
+// ============================================================================
+// INVOICE CREATE FORM - Formulaire création facture électronique
+// ============================================================================
+
+const InvoiceCreateForm = ({ onBack, onCreated }) => {
+  const [clients, setClients] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [formData, setFormData] = useState({
+    customer_id: '',
+    customer_name: '',
+    siren_client: '',
+    address_billing: '',
+    address_delivery: '',
+    invoice_date: new Date().toISOString().split('T')[0],
+    due_date: '',
+    payment_terms: '30 jours',
+    payment_method: 'virement',
+    notes: '',
+    lines: [
+      { line_number: 1, designation: '', quantity: 1, unit_price_ht: 0, tva_rate: 20 }
+    ]
+  });
+
+  // Charger les clients
+  useEffect(() => {
+    loadClients();
+    // Auto-remplir échéance (+30 jours)
+    const dueDate = new Date();
+    dueDate.setDate(dueDate.getDate() + 30);
+    setFormData(prev => ({ ...prev, due_date: dueDate.toISOString().split('T')[0] }));
+  }, []);
+
+  const loadClients = async () => {
+    try {
+      const response = await axios.get(`${API}/clients`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      setClients(response.data || []);
+    } catch (error) {
+      console.error('Erreur chargement clients:', error);
+    }
+  };
+
+  // Sélection client
+  const handleClientChange = (clientId) => {
+    const client = clients.find(c => c.id === clientId);
+    if (client) {
+      setFormData(prev => ({
+        ...prev,
+        customer_id: clientId,
+        customer_name: client.name,
+        siren_client: client.siren || '',
+        address_billing: `${client.address || ''}, ${client.postal_code || ''} ${client.city || ''}`.trim(),
+        address_delivery: ''
+      }));
+    }
+  };
+
+  // Ajouter ligne
+  const addLine = () => {
+    setFormData(prev => ({
+      ...prev,
+      lines: [...prev.lines, {
+        line_number: prev.lines.length + 1,
+        designation: '',
+        quantity: 1,
+        unit_price_ht: 0,
+        tva_rate: 20
+      }]
+    }));
+  };
+
+  // Supprimer ligne
+  const removeLine = (index) => {
+    if (formData.lines.length === 1) return;
+    setFormData(prev => ({
+      ...prev,
+      lines: prev.lines.filter((_, i) => i !== index).map((line, i) => ({
+        ...line,
+        line_number: i + 1
+      }))
+    }));
+  };
+
+  // Modifier ligne
+  const updateLine = (index, field, value) => {
+    setFormData(prev => ({
+      ...prev,
+      lines: prev.lines.map((line, i) => 
+        i === index ? { ...line, [field]: value } : line
+      )
+    }));
+  };
+
+  // Calculer totaux
+  const calculateTotals = () => {
+    let totalHT = 0;
+    const tvaByRate = {};
+
+    formData.lines.forEach(line => {
+      const lineTotal = (parseFloat(line.quantity) || 0) * (parseFloat(line.unit_price_ht) || 0);
+      totalHT += lineTotal;
+
+      const tvaAmount = lineTotal * (parseFloat(line.tva_rate) / 100);
+      if (!tvaByRate[line.tva_rate]) {
+        tvaByRate[line.tva_rate] = 0;
+      }
+      tvaByRate[line.tva_rate] += tvaAmount;
+    });
+
+    const totalTVA = Object.values(tvaByRate).reduce((sum, tva) => sum + tva, 0);
+    const totalTTC = totalHT + totalTVA;
+
+    return {
+      totalHT: totalHT.toFixed(2),
+      totalTVA: totalTVA.toFixed(2),
+      totalTTC: totalTTC.toFixed(2),
+      tvaByRate: Object.entries(tvaByRate).map(([rate, amount]) => ({
+        rate: parseFloat(rate),
+        amount: amount.toFixed(2)
+      })).sort((a, b) => b.rate - a.rate)
+    };
+  };
+
+  // Soumettre facture
+  const handleSubmit = async () => {
+    // Validations
+    if (!formData.customer_id) {
+      alert('❌ Veuillez sélectionner un client');
+      return;
+    }
+    if (!formData.siren_client || formData.siren_client.length !== 9) {
+      alert('❌ SIREN client obligatoire (9 chiffres)');
+      return;
+    }
+    if (formData.lines.some(l => !l.designation || l.unit_price_ht <= 0)) {
+      alert('❌ Toutes les lignes doivent avoir une désignation et un prix');
+      return;
+    }
+
+    try {
+      setLoading(true);
+      
+      const totals = calculateTotals();
+      const invoiceData = {
+        ...formData,
+        total_ht: parseFloat(totals.totalHT),
+        total_tva: parseFloat(totals.totalTVA),
+        total_ttc: parseFloat(totals.totalTTC),
+        format: 'pdf', // Commencer par PDF simple
+        lines: formData.lines.map((line, i) => ({
+          ...line,
+          line_number: i + 1,
+          quantity: parseFloat(line.quantity),
+          unit_price_ht: parseFloat(line.unit_price_ht),
+          tva_rate: parseFloat(line.tva_rate),
+          tva_amount: (parseFloat(line.quantity) * parseFloat(line.unit_price_ht) * parseFloat(line.tva_rate) / 100).toFixed(2),
+          total_ht: (parseFloat(line.quantity) * parseFloat(line.unit_price_ht)).toFixed(2),
+          total_ttc: ((parseFloat(line.quantity) * parseFloat(line.unit_price_ht)) * (1 + parseFloat(line.tva_rate) / 100)).toFixed(2)
+        }))
+      };
+
+      await axios.post(`${API}/invoices/electronic`, invoiceData, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+
+      alert('✅ Facture créée avec succès !');
+      onCreated();
+      onBack();
+    } catch (error) {
+      console.error('Erreur création facture:', error);
+      alert('❌ Erreur lors de la création de la facture');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const totals = calculateTotals();
+
+  return (
+    <div>
+      {/* Header */}
+      <div className="flex items-center gap-4 mb-6">
+        <button onClick={onBack} className="p-2 hover:bg-gray-100 rounded-lg transition-colors">
+          <ArrowLeft className="h-6 w-6 text-gray-700" />
+        </button>
+        <div>
+          <h2 className="text-2xl font-bold text-gray-900">Nouvelle facture électronique</h2>
+          <p className="text-gray-600 mt-1">Conforme Factur-X • SIREN obligatoire</p>
+        </div>
+      </div>
+
+      <div className="space-y-6">
+        {/* Informations client */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <User className="h-5 w-5 text-indigo-600" />
+              Informations client
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* Sélection client */}
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-2">Client *</label>
+              <select
+                value={formData.customer_id}
+                onChange={(e) => handleClientChange(e.target.value)}
+                className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none"
+              >
+                <option value="">-- Sélectionner un client --</option>
+                {clients.map((client) => (
+                  <option key={client.id} value={client.id}>
+                    {client.name} {client.siren ? `(SIREN: ${client.siren})` : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {/* SIREN obligatoire */}
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-2">
+                SIREN client * <span className="text-red-500">(9 chiffres obligatoires)</span>
+              </label>
+              <input
+                type="text"
+                maxLength="9"
+                value={formData.siren_client}
+                onChange={(e) => setFormData({ ...formData, siren_client: e.target.value.replace(/\D/g, '') })}
+                placeholder="123456789"
+                className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none"
+              />
+            </div>
+
+            {/* Adresse facturation */}
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-2">Adresse de facturation *</label>
+              <textarea
+                value={formData.address_billing}
+                onChange={(e) => setFormData({ ...formData, address_billing: e.target.value })}
+                rows="2"
+                className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none"
+              />
+            </div>
+
+            {/* Adresse livraison (optionnelle) */}
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-2">Adresse de livraison (si différente)</label>
+              <textarea
+                value={formData.address_delivery}
+                onChange={(e) => setFormData({ ...formData, address_delivery: e.target.value })}
+                rows="2"
+                placeholder="Laisser vide si identique à l'adresse de facturation"
+                className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none"
+              />
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Dates et paiement */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <Calendar className="h-5 w-5 text-indigo-600" />
+              Dates et conditions de paiement
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-2">Date facture *</label>
+              <input
+                type="date"
+                value={formData.invoice_date}
+                onChange={(e) => setFormData({ ...formData, invoice_date: e.target.value })}
+                className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-2">Date échéance *</label>
+              <input
+                type="date"
+                value={formData.due_date}
+                onChange={(e) => setFormData({ ...formData, due_date: e.target.value })}
+                className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-2">Conditions paiement</label>
+              <select
+                value={formData.payment_terms}
+                onChange={(e) => setFormData({ ...formData, payment_terms: e.target.value })}
+                className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none"
+              >
+                <option value="Comptant">Comptant</option>
+                <option value="15 jours">15 jours</option>
+                <option value="30 jours">30 jours</option>
+                <option value="45 jours">45 jours</option>
+                <option value="60 jours">60 jours</option>
+              </select>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Lignes de facturation */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <List className="h-5 w-5 text-indigo-600" />
+                Lignes de facturation
+              </div>
+              <Button onClick={addLine} variant="outline" size="sm">
+                <Plus className="h-4 w-4 mr-2" />
+                Ajouter ligne
+              </Button>
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            {/* En-têtes colonnes */}
+            <div className="grid grid-cols-12 gap-3 mb-3 text-sm font-semibold text-gray-700 px-2">
+              <div className="col-span-4">Désignation</div>
+              <div className="col-span-2">Quantité</div>
+              <div className="col-span-2">Prix HT</div>
+              <div className="col-span-2">TVA</div>
+              <div className="col-span-2 text-right">Total HT</div>
+            </div>
+
+            {/* Lignes */}
+            <div className="space-y-3">
+              {formData.lines.map((line, index) => {
+                const lineTotal = (parseFloat(line.quantity) || 0) * (parseFloat(line.unit_price_ht) || 0);
+                return (
+                  <div key={index} className="grid grid-cols-12 gap-3 items-center bg-gray-50 p-3 rounded-xl">
+                    <div className="col-span-4">
+                      <input
+                        type="text"
+                        value={line.designation}
+                        onChange={(e) => updateLine(index, 'designation', e.target.value)}
+                        placeholder="Description de la ligne"
+                        className="w-full px-3 py-2 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none"
+                      />
+                    </div>
+                    <div className="col-span-2">
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={line.quantity}
+                        onChange={(e) => updateLine(index, 'quantity', e.target.value)}
+                        className="w-full px-3 py-2 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none"
+                      />
+                    </div>
+                    <div className="col-span-2">
+                      <input
+                        type="number"
+                        step="0.01"
+                        value={line.unit_price_ht}
+                        onChange={(e) => updateLine(index, 'unit_price_ht', e.target.value)}
+                        placeholder="0.00"
+                        className="w-full px-3 py-2 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none"
+                      />
+                    </div>
+                    <div className="col-span-2">
+                      <select
+                        value={line.tva_rate}
+                        onChange={(e) => updateLine(index, 'tva_rate', parseFloat(e.target.value))}
+                        className="w-full px-3 py-2 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none"
+                      >
+                        <option value={20}>20%</option>
+                        <option value={10}>10%</option>
+                        <option value={5.5}>5,5%</option>
+                        <option value={0}>0%</option>
+                      </select>
+                    </div>
+                    <div className="col-span-1 text-right font-semibold text-gray-900">
+                      {lineTotal.toFixed(2)}€
+                    </div>
+                    <div className="col-span-1 text-center">
+                      {formData.lines.length > 1 && (
+                        <button
+                          onClick={() => removeLine(index)}
+                          className="p-2 hover:bg-red-100 rounded-lg transition-colors text-red-600"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Totaux */}
+            <div className="mt-6 pt-6 border-t-2 border-gray-200">
+              <div className="max-w-md ml-auto space-y-3">
+                <div className="flex justify-between items-center text-lg">
+                  <span className="font-semibold text-gray-700">Total HT</span>
+                  <span className="font-bold text-gray-900">{totals.totalHT}€</span>
+                </div>
+                
+                {/* Détail TVA par taux */}
+                {totals.tvaByRate.map((tva) => (
+                  <div key={tva.rate} className="flex justify-between items-center text-sm">
+                    <span className="text-gray-600">TVA {tva.rate}%</span>
+                    <span className="font-semibold text-gray-900">{tva.amount}€</span>
+                  </div>
+                ))}
+                
+                <div className="flex justify-between items-center text-lg pt-3 border-t border-gray-200">
+                  <span className="font-semibold text-gray-700">Total TVA</span>
+                  <span className="font-bold text-gray-900">{totals.totalTVA}€</span>
+                </div>
+                
+                <div className="flex justify-between items-center text-2xl pt-3 border-t-2 border-gray-300">
+                  <span className="font-bold text-gray-900">Total TTC</span>
+                  <span className="font-bold text-indigo-600">{totals.totalTTC}€</span>
+                </div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Notes */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <FileText className="h-5 w-5 text-indigo-600" />
+              Notes et mentions
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <textarea
+              value={formData.notes}
+              onChange={(e) => setFormData({ ...formData, notes: e.target.value })}
+              rows="3"
+              placeholder="Notes complémentaires, conditions particulières..."
+              className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none"
+            />
+          </CardContent>
+        </Card>
+
+        {/* Actions */}
+        <div className="flex gap-4 justify-end">
+          <Button onClick={onBack} variant="outline" disabled={loading}>
+            Annuler
+          </Button>
+          <Button
+            onClick={handleSubmit}
+            disabled={loading}
+            className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white hover:from-indigo-700 hover:to-purple-700"
+          >
+            {loading ? (
+              <>
+                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                Création...
+              </>
+            ) : (
+              <>
+                <Save className="h-4 w-4 mr-2" />
+                Créer la facture
+              </>
+            )}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
+// MODULES COMPLÉMENTAIRES - Réception, E-Reporting, Archivage
+// ============================================================================
+
+// Module 1: Réception de factures
+const ReceivedInvoicesModule = () => {
+  const [receivedInvoices, setReceivedInvoices] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [showUploadForm, setShowUploadForm] = useState(false);
+  const [uploadData, setUploadData] = useState({
+    file: null,
+    supplier_name: '',
+    supplier_siren: '',
+    invoice_number: '',
+    invoice_date: new Date().toISOString().split('T')[0],
+    due_date: '',
+    total_ht: '',
+    total_tva: '',
+    total_ttc: '',
+    format_type: 'pdf-simple',
+    notes: ''
+  });
+
+  useEffect(() => {
+    if (!showUploadForm) {
+      loadReceivedInvoices();
+    }
+  }, [showUploadForm]);
+
+  const loadReceivedInvoices = async () => {
+    setLoading(true);
+    try {
+      const response = await axios.get(`${API}/invoices/received`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      setReceivedInvoices(response.data || []);
+    } catch (error) {
+      console.error('Erreur chargement factures reçues:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleFileChange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      setUploadData({ ...uploadData, file });
+    }
+  };
+
+  const handleUpload = async (e) => {
+    e.preventDefault();
+    if (!uploadData.file) {
+      alert('Veuillez sélectionner un fichier');
+      return;
+    }
+    setLoading(true);
+    try {
+      const formData = new FormData();
+      formData.append('file', uploadData.file);
+      Object.keys(uploadData).forEach(key => {
+        if (key !== 'file' && uploadData[key]) {
+          formData.append(key, uploadData[key]);
+        }
+      });
+
+      await axios.post(`${API}/invoices/received`, formData, {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token')}`,
+          'Content-Type': 'multipart/form-data'
+        }
+      });
+
+      alert('✅ Facture importée !');
+      setShowUploadForm(false);
+      setUploadData({
+        file: null,
+        supplier_name: '',
+        supplier_siren: '',
+        invoice_number: '',
+        invoice_date: new Date().toISOString().split('T')[0],
+        due_date: '',
+        total_ht: '',
+        total_tva: '',
+        total_ttc: '',
+        format_type: 'pdf-simple',
+        notes: ''
+      });
+    } catch (error) {
+      console.error('Erreur upload:', error);
+      alert('❌ Erreur upload');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updateInvoiceStatus = async (invoiceId, newStatus) => {
+    try {
+      await axios.patch(
+        `${API}/invoices/received/${invoiceId}/status`,
+        { status: newStatus },
+        { headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` } }
+      );
+      loadReceivedInvoices();
+    } catch (error) {
+      console.error('Erreur mise à jour statut:', error);
+    }
+  };
+
+  if (showUploadForm) {
+    return (
+      <div>
+        <button onClick={() => setShowUploadForm(false)} className="mb-6 flex items-center gap-2 text-gray-600 hover:text-gray-900">
+          <ArrowLeft className="h-5 w-5" />Retour
+        </button>
+        <h2 className="text-2xl font-bold text-gray-900 mb-6">📤 Importer une facture reçue</h2>
+        <form onSubmit={handleUpload} className="space-y-6">
+          <Card>
+            <CardContent className="space-y-4 pt-6">
+              <input type="file" accept=".pdf,.xml" onChange={handleFileChange} className="w-full" required />
+              <input type="text" placeholder="Nom fournisseur *" value={uploadData.supplier_name} onChange={(e) => setUploadData({ ...uploadData, supplier_name: e.target.value })} className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl" required />
+              <input type="text" placeholder="SIREN (9 chiffres)" maxLength="9" value={uploadData.supplier_siren} onChange={(e) => setUploadData({ ...uploadData, supplier_siren: e.target.value.replace(/\D/g, '') })} className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl" />
+              <input type="text" placeholder="N° Facture *" value={uploadData.invoice_number} onChange={(e) => setUploadData({ ...uploadData, invoice_number: e.target.value })} className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl" required />
+              <div className="grid grid-cols-3 gap-4">
+                <input type="number" step="0.01" placeholder="Total HT *" value={uploadData.total_ht} onChange={(e) => setUploadData({ ...uploadData, total_ht: e.target.value })} className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl" required />
+                <input type="number" step="0.01" placeholder="Total TVA *" value={uploadData.total_tva} onChange={(e) => setUploadData({ ...uploadData, total_tva: e.target.value })} className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl" required />
+                <input type="number" step="0.01" placeholder="Total TTC *" value={uploadData.total_ttc} onChange={(e) => setUploadData({ ...uploadData, total_ttc: e.target.value })} className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl" required />
+              </div>
+            </CardContent>
+          </Card>
+          <Button type="submit" disabled={loading} className="w-full bg-gradient-to-r from-indigo-600 to-purple-600 text-white">
+            {loading ? <Loader2 className="h-5 w-5 animate-spin" /> : '✅ Importer'}
+          </Button>
+        </form>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="flex justify-between mb-6">
+        <div>
+          <h2 className="text-2xl font-bold">📥 Factures reçues</h2>
+          <p className="text-gray-600">Import et gestion des factures fournisseurs</p>
+        </div>
+        <Button onClick={() => setShowUploadForm(true)} className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white">
+          <Upload className="h-4 w-4 mr-2" />Importer
+        </Button>
+      </div>
+      {loading ? <div className="text-center py-12"><Loader2 className="h-12 w-12 animate-spin mx-auto text-indigo-600" /></div> : 
+      receivedInvoices.length === 0 ? <div className="text-center py-12 bg-gray-50 rounded-2xl"><Download className="h-16 w-16 mx-auto text-gray-300 mb-4" /><p className="text-gray-500">Aucune facture</p></div> :
+      <div className="space-y-3">{receivedInvoices.map((inv) => (
+        <div key={inv.id} className="p-4 border-2 rounded-xl">
+          <div className="flex justify-between">
+            <div><div className="font-bold">{inv.invoice_number}</div><div className="text-sm text-gray-500">{inv.supplier_name}</div></div>
+            <div><div className="font-bold">{inv.total_ttc}€</div>
+            <select value={inv.status} onChange={(e) => updateInvoiceStatus(inv.id, e.target.value)} className="mt-2 px-3 py-1 rounded-lg text-sm">
+              <option value="received">📥 Reçue</option>
+              <option value="processing">⏳ Traitement</option>
+              <option value="validated">✅ Validée</option>
+              <option value="rejected">❌ Rejetée</option>
+              <option value="paid">💳 Payée</option>
+            </select></div>
+          </div>
+        </div>
+      ))}</div>}
+    </div>
+  );
+};
+
+// Module 2: E-Reporting
+const EReportingModule = () => {
+  const [declarations, setDeclarations] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [showCreateForm, setShowCreateForm] = useState(false);
+  const [formData, setFormData] = useState({
+    declaration_type: 'b2c',
+    period_start: new Date().toISOString().split('T')[0],
+    period_end: new Date().toISOString().split('T')[0],
+    total_ht: '',
+    total_tva: '',
+    total_ttc: '',
+    operations_count: '',
+    notes: ''
+  });
+
+  useEffect(() => {
+    if (!showCreateForm) {
+      loadDeclarations();
+    }
+  }, [showCreateForm]);
+
+  const loadDeclarations = async () => {
+    setLoading(true);
+    try {
+      const response = await axios.get(`${API}/e-reporting`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      setDeclarations(response.data || []);
+    } catch (error) {
+      console.error('Erreur:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    try {
+      await axios.post(`${API}/e-reporting`, formData, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      alert('✅ Déclaration créée !');
+      setShowCreateForm(false);
+    } catch (error) {
+      alert('❌ Erreur');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const transmitDeclaration = async (id) => {
+    if (!confirm('Transmettre au PDP ?')) return;
+    try {
+      await axios.patch(`${API}/e-reporting/${id}/transmit`, {}, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      alert('✅ Transmise !');
+      loadDeclarations();
+    } catch (error) {
+      alert('❌ Erreur');
+    }
+  };
+
+  if (showCreateForm) {
+    return (
+      <div>
+        <button onClick={() => setShowCreateForm(false)} className="mb-6 flex items-center gap-2 text-gray-600"><ArrowLeft className="h-5 w-5" />Retour</button>
+        <h2 className="text-2xl font-bold mb-6">📊 Nouvelle déclaration</h2>
+        <form onSubmit={handleSubmit} className="space-y-6">
+          <Card>
+            <CardContent className="space-y-4 pt-6">
+              <select value={formData.declaration_type} onChange={(e) => setFormData({...formData, declaration_type: e.target.value})} className="w-full px-4 py-3 border-2 rounded-xl" required>
+                <option value="b2c">B2C (Particuliers)</option>
+                <option value="export">Export hors UE</option>
+                <option value="intra-ue">Intra-UE</option>
+              </select>
+              <div className="grid grid-cols-3 gap-4">
+                <input type="number" step="0.01" placeholder="Total HT *" value={formData.total_ht} onChange={(e) => setFormData({...formData, total_ht: e.target.value})} className="px-4 py-3 border-2 rounded-xl" required />
+                <input type="number" step="0.01" placeholder="Total TVA *" value={formData.total_tva} onChange={(e) => setFormData({...formData, total_tva: e.target.value})} className="px-4 py-3 border-2 rounded-xl" required />
+                <input type="number" step="0.01" placeholder="Total TTC *" value={formData.total_ttc} onChange={(e) => setFormData({...formData, total_ttc: e.target.value})} className="px-4 py-3 border-2 rounded-xl" required />
+              </div>
+              <input type="number" placeholder="Nb opérations *" value={formData.operations_count} onChange={(e) => setFormData({...formData, operations_count: e.target.value})} className="w-full px-4 py-3 border-2 rounded-xl" required />
+            </CardContent>
+          </Card>
+          <Button type="submit" disabled={loading} className="w-full bg-gradient-to-r from-indigo-600 to-purple-600 text-white">
+            {loading ? <Loader2 className="h-5 w-5 animate-spin" /> : '✅ Créer'}
+          </Button>
+        </form>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div className="flex justify-between mb-6">
+        <div><h2 className="text-2xl font-bold">📊 E-Reporting</h2><p className="text-gray-600">B2C, Export, Intra-UE</p></div>
+        <Button onClick={() => setShowCreateForm(true)} className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white"><Plus className="h-4 w-4 mr-2" />Nouvelle</Button>
+      </div>
+      {loading ? <div className="text-center py-12"><Loader2 className="h-12 w-12 animate-spin mx-auto" /></div> : 
+      declarations.length === 0 ? <div className="text-center py-12 bg-gray-50 rounded-2xl"><BarChart3 className="h-16 w-16 mx-auto text-gray-300 mb-4" /><p className="text-gray-500">Aucune déclaration</p></div> :
+      <div className="space-y-3">{declarations.map((d) => (
+        <div key={d.id} className="p-4 border-2 rounded-xl">
+          <div className="flex justify-between">
+            <div><div className="font-bold">{d.declaration_type === 'b2c' ? '🛒 B2C' : d.declaration_type === 'export' ? '🌍 Export' : '🇪🇺 Intra-UE'}</div><div className="text-sm">{d.operations_count} ops</div></div>
+            <div><div className="font-bold">{d.total_ttc}€</div>
+            {d.status === 'draft' ? <Button onClick={() => transmitDeclaration(d.id)} size="sm" className="mt-2">📤 Transmettre</Button> : 
+            <Badge className="mt-2">{d.status === 'transmitted' ? '📤 Transmise' : d.status === 'accepted' ? '✅ Acceptée' : '❌ Rejetée'}</Badge>}</div>
+          </div>
+        </div>
+      ))}</div>}
+    </div>
+  );
+};
+
+// Module 3: Archivage
+const ArchivesModule = () => {
+  const [archives, setArchives] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [filterType, setFilterType] = useState('all');
+
+  useEffect(() => {
+    loadArchives();
+  }, [filterType]);
+
+  const loadArchives = async () => {
+    setLoading(true);
+    try {
+      const params = filterType !== 'all' ? { document_type: filterType } : {};
+      const response = await axios.get(`${API}/archives`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` },
+        params
+      });
+      setArchives(response.data || []);
+    } catch (error) {
+      console.error('Erreur:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const verifyIntegrity = async (id) => {
+    try {
+      const response = await axios.post(`${API}/archives/${id}/verify`, {}, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      alert(response.data.integrity_status === 'valid' ? '✅ Archive valide' : '❌ Archive corrompue');
+      loadArchives();
+    } catch (error) {
+      alert('❌ Erreur');
+    }
+  };
+
+  return (
+    <div>
+      <div className="flex justify-between mb-6">
+        <div><h2 className="text-2xl font-bold">🗄️ Archivage légal</h2><p className="text-gray-600">Conservation 10 ans</p></div>
+        <div className="flex gap-2">
+          <Button onClick={() => setFilterType('all')} variant={filterType === 'all' ? 'default' : 'outline'} size="sm">Tous</Button>
+          <Button onClick={() => setFilterType('invoice-emitted')} variant={filterType === 'invoice-emitted' ? 'default' : 'outline'} size="sm">Émises</Button>
+          <Button onClick={() => setFilterType('invoice-received')} variant={filterType === 'invoice-received' ? 'default' : 'outline'} size="sm">Reçues</Button>
+        </div>
+      </div>
+      {loading ? <div className="text-center py-12"><Loader2 className="h-12 w-12 animate-spin mx-auto" /></div> : 
+      archives.length === 0 ? <div className="text-center py-12 bg-gray-50 rounded-2xl"><Shield className="h-16 w-16 mx-auto text-gray-300 mb-4" /><p className="text-gray-500">Aucune archive</p></div> :
+      <div className="space-y-3">{archives.map((a) => (
+        <div key={a.id} className="p-4 border-2 rounded-xl">
+          <div className="flex justify-between">
+            <div><div className="font-bold">{a.document_number}</div><div className="text-sm text-gray-500">{a.party_name}</div></div>
+            <div><div className="font-bold">{a.total_ttc}€</div>
+            <Badge className={`mt-2 ${a.integrity_status === 'valid' ? 'bg-green-100 text-green-700' : a.integrity_status === 'corrupted' ? 'bg-red-100 text-red-700' : 'bg-gray-100'}`}>
+              {a.integrity_status === 'valid' ? '✅ Valide' : a.integrity_status === 'corrupted' ? '❌ Corrompu' : '⏳ Non vérifié'}
+            </Badge>
+            <Button onClick={() => verifyIntegrity(a.id)} size="sm" variant="outline" className="mt-2 w-full">🔍 Vérifier</Button></div>
+          </div>
+        </div>
+      ))}</div>}
+    </div>
+  );
+};
+
+// ============================================================================
+// INVOICING MODULE - Facturation Électronique (Réforme 2026-2027)
+// ============================================================================
+
+const InvoicingModule = () => {
+  const [activeSubTab, setActiveSubTab] = useState('emit'); // emit, receive, reporting, archive
+  const [invoices, setInvoices] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [showCreateForm, setShowCreateForm] = useState(false);
+
+  // Charger les factures
+  useEffect(() => {
+    if (activeSubTab === 'emit') {
+      loadInvoices();
+    }
+  }, [activeSubTab]);
+
+  const loadInvoices = async () => {
+    try {
+      setLoading(true);
+      const response = await axios.get(`${API}/invoices/electronic`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      setInvoices(response.data || []);
+    } catch (error) {
+      console.error('Erreur chargement factures:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 via-indigo-50 to-purple-50 p-6">
+      {/* Header */}
+      <div className="mb-8">
+        <div className="flex items-center gap-3 mb-3">
+          <FileText className="h-10 w-10 text-indigo-600" />
+          <div>
+            <h1 className="text-4xl font-bold text-gray-900">Facturation Électronique</h1>
+            <p className="text-gray-600 mt-1">Conforme réforme DGFiP 2026-2027 • Format Factur-X</p>
+          </div>
+        </div>
+        
+        {/* Bannière conformité */}
+        <div className="bg-gradient-to-r from-green-500 to-emerald-600 text-white p-4 rounded-2xl shadow-lg">
+          <div className="flex items-center gap-3">
+            <CheckCircle className="h-6 w-6" />
+            <div>
+              <p className="font-semibold">✅ Module conforme loi française</p>
+              <p className="text-sm text-white/90">Réception obligatoire : 1er sept. 2026 • Émission : 1er sept. 2026 (ETI) / 2027 (PME/TPE)</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Sous-onglets */}
+      <div className="mb-6">
+        <div className="flex gap-2 bg-white p-2 rounded-2xl shadow-md border border-gray-200 overflow-x-auto">
+          <button
+            onClick={() => setActiveSubTab('emit')}
+            className={`px-6 py-3 rounded-xl font-medium transition-all ${
+              activeSubTab === 'emit'
+                ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-lg'
+                : 'text-gray-600 hover:bg-gray-100'
+            }`}
+          >
+            📤 Émettre
+          </button>
+          <button
+            onClick={() => setActiveSubTab('receive')}
+            className={`px-6 py-3 rounded-xl font-medium transition-all ${
+              activeSubTab === 'receive'
+                ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-lg'
+                : 'text-gray-600 hover:bg-gray-100'
+            }`}
+          >
+            📥 Recevoir
+          </button>
+          <button
+            onClick={() => setActiveSubTab('reporting')}
+            className={`px-6 py-3 rounded-xl font-medium transition-all ${
+              activeSubTab === 'reporting'
+                ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-lg'
+                : 'text-gray-600 hover:bg-gray-100'
+            }`}
+          >
+            📊 E-Reporting
+          </button>
+          <button
+            onClick={() => setActiveSubTab('archive')}
+            className={`px-6 py-3 rounded-xl font-medium transition-all ${
+              activeSubTab === 'archive'
+                ? 'bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-lg'
+                : 'text-gray-600 hover:bg-gray-100'
+            }`}
+          >
+            🗄️ Archivage
+          </button>
+        </div>
+      </div>
+
+      {/* Contenu selon sous-onglet */}
+      <div className="bg-white rounded-3xl shadow-2xl p-8 border border-gray-100">
+        {activeSubTab === 'emit' && !showCreateForm && (
+          <div>
+            <div className="flex items-center justify-between mb-6">
+              <div>
+                <h2 className="text-2xl font-bold text-gray-900">📤 Factures émises</h2>
+                <p className="text-gray-600 mt-1">Gérez vos factures électroniques conformes Factur-X</p>
+              </div>
+              <Button
+                onClick={() => setShowCreateForm(true)}
+                className="bg-gradient-to-r from-indigo-600 to-purple-600 text-white hover:from-indigo-700 hover:to-purple-700"
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                Nouvelle Facture
+              </Button>
+            </div>
+
+            {loading ? (
+              <div className="text-center py-12">
+                <Loader2 className="h-12 w-12 animate-spin mx-auto text-indigo-600" />
+                <p className="text-gray-500 mt-4">Chargement des factures...</p>
+              </div>
+            ) : invoices.length === 0 ? (
+              <div className="text-center py-12 bg-gray-50 rounded-2xl">
+                <FileText className="h-16 w-16 mx-auto text-gray-300 mb-4" />
+                <p className="text-gray-500 font-medium">Aucune facture émise</p>
+                <p className="text-sm text-gray-400 mt-1">Cliquez sur "Nouvelle Facture" pour commencer</p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {invoices.map((invoice) => (
+                  <div key={invoice.id} className="p-4 border-2 border-gray-200 rounded-xl hover:border-indigo-300 transition-all cursor-pointer">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-4">
+                        <div className="p-3 bg-indigo-100 rounded-lg">
+                          <FileText className="h-6 w-6 text-indigo-600" />
+                        </div>
+                        <div>
+                          <div className="font-semibold text-gray-900">{invoice.invoice_number}</div>
+                          <div className="text-sm text-gray-500">{invoice.customer_name}</div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-6">
+                        <div className="text-right">
+                          <div className="font-bold text-gray-900">{invoice.total_ttc}€</div>
+                          <div className="text-xs text-gray-500">{new Date(invoice.invoice_date).toLocaleDateString('fr-FR')}</div>
+                        </div>
+                        <Badge className={`
+                          ${invoice.status_pdp === 'accepted' ? 'bg-green-100 text-green-700' : ''}
+                          ${invoice.status_pdp === 'rejected' ? 'bg-red-100 text-red-700' : ''}
+                          ${invoice.status_pdp === 'draft' ? 'bg-gray-100 text-gray-700' : ''}
+                          ${invoice.status_pdp === 'transmitted' ? 'bg-blue-100 text-blue-700' : ''}
+                        `}>
+                          {invoice.status_pdp === 'accepted' && '✅ Acceptée'}
+                          {invoice.status_pdp === 'rejected' && '❌ Rejetée'}
+                          {invoice.status_pdp === 'draft' && '📝 Brouillon'}
+                          {invoice.status_pdp === 'transmitted' && '📤 Envoyée'}
+                        </Badge>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {activeSubTab === 'emit' && showCreateForm && (
+          <InvoiceCreateForm onBack={() => setShowCreateForm(false)} onCreated={loadInvoices} />
+        )}
+
+        {activeSubTab === 'receive' && (
+          <ReceivedInvoicesModule />
+        )}
+
+        {activeSubTab === 'reporting' && (
+          <EReportingModule />
+        )}
+
+        {activeSubTab === 'archive' && (
+          <ArchivesModule />
+        )}
+      </div>
+
+      {/* Informations complémentaires */}
+      <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="bg-white p-6 rounded-2xl shadow-md border border-gray-200">
+          <div className="flex items-center gap-3 mb-3">
+            <CheckCircle className="h-8 w-8 text-green-500" />
+            <h3 className="font-bold text-gray-900">Formats supportés</h3>
+          </div>
+          <ul className="text-sm text-gray-600 space-y-1">
+            <li>• Factur-X (PDF + XML)</li>
+            <li>• UBL XML (standard UE)</li>
+            <li>• CII (Cross Industry Invoice)</li>
+          </ul>
+        </div>
+
+        <div className="bg-white p-6 rounded-2xl shadow-md border border-gray-200">
+          <div className="flex items-center gap-3 mb-3">
+            <Globe className="h-8 w-8 text-blue-500" />
+            <h3 className="font-bold text-gray-900">PDP Compatible</h3>
+          </div>
+          <ul className="text-sm text-gray-600 space-y-1">
+            <li>• <span className="font-semibold text-blue-600">IOPOLE</span></li>
+            <li>• Yooz</li>
+            <li>• Jefacture</li>
+            <li>• Pennylane</li>
+            <li>• Sellsy / MyUnisoft</li>
+          </ul>
+        </div>
+
+        <div className="bg-white p-6 rounded-2xl shadow-md border border-gray-200">
+          <div className="flex items-center gap-3 mb-3">
+            <Calendar className="h-8 w-8 text-orange-500" />
+            <h3 className="font-bold text-gray-900">Deadlines légales</h3>
+          </div>
+          <ul className="text-sm text-gray-600 space-y-1">
+            <li>• 📥 Réception : 01/09/2026</li>
+            <li>• 📤 ETI : 01/09/2026</li>
+            <li>• 📤 PME/TPE : 01/09/2027</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
+// COMPANY SETTINGS - Paramètres Entreprise
+// ============================================================================
+
+const CompanySettings = ({ onBack }) => {
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [companyInfo, setCompanyInfo] = useState({
+    company_name: '',
+    legal_form: '',
+    address: '',
+    postal_code: '',
+    city: '',
+    siret: '',
+    siren: '',
+    rcs_rm: '',
+    logo_url: ''
+  });
+  const [logoFile, setLogoFile] = useState(null);
+  const [logoPreview, setLogoPreview] = useState(null);
+
+  const legalForms = [
+    'Auto-entrepreneur / Micro-entreprise',
+    'SASU',
+    'SARL',
+    'SAS',
+    'EURL',
+    'SNC',
+    'Artisan',
+    'Association',
+    'Autre'
+  ];
+
+  useEffect(() => {
+    loadCompanyInfo();
+  }, []);
+
+  const loadCompanyInfo = async () => {
+    try {
+      const response = await axios.get(`${API}/company-settings`, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+      if (response.data) {
+        // S'assurer que tous les champs ont des valeurs (pas undefined)
+        const data = {
+          company_name: response.data.company_name || '',
+          legal_form: response.data.legal_form || '',
+          address: response.data.address || '',
+          postal_code: response.data.postal_code || '',
+          city: response.data.city || '',
+          siret: response.data.siret || '',
+          siren: response.data.siren || '',
+          rcs_rm: response.data.rcs_rm || '',
+          logo_url: response.data.logo_url || ''
+        };
+        setCompanyInfo(data);
+        
+        if (response.data.logo_url) {
+          // Si l'URL du logo est relative, ajouter l'URL du backend
+          const logoUrl = response.data.logo_url.startsWith('http') 
+            ? response.data.logo_url 
+            : `${API.replace('/api', '')}${response.data.logo_url}`;
+          setLogoPreview(logoUrl);
+        }
+      }
+    } catch (error) {
+      console.log('Aucune info entreprise enregistrée');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleLogoChange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      setLogoFile(file);
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setLogoPreview(reader.result);
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      // Si un logo est uploadé, l'envoyer d'abord
+      let logoUrl = companyInfo.logo_url;
+      if (logoFile) {
+        const formData = new FormData();
+        formData.append('logo', logoFile);
+        
+        const uploadResponse = await axios.post(`${API}/company-settings/logo`, formData, {
+          headers: {
+            'Authorization': `Bearer ${localStorage.getItem('token')}`,
+            'Content-Type': 'multipart/form-data'
+          }
+        });
+        logoUrl = uploadResponse.data.logo_url;
+      }
+
+      // Enregistrer les informations
+      await axios.post(`${API}/company-settings`, {
+        ...companyInfo,
+        logo_url: logoUrl
+      }, {
+        headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+      });
+
+      alert('✅ Informations enregistrées avec succès !');
+      
+      // Réinitialiser le fichier logo et recharger
+      setLogoFile(null);
+      await loadCompanyInfo();
+    } catch (error) {
+      console.error('Erreur sauvegarde:', error);
+      alert('❌ Erreur lors de la sauvegarde');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-indigo-50 to-purple-50 p-6 flex items-center justify-center">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600"></div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-indigo-50 to-purple-50 p-6">
+      {/* Header */}
+      <div className="mb-8 flex items-center gap-4">
+        <button
+          onClick={onBack}
+          className="p-2 hover:bg-white/50 rounded-lg transition-colors"
+        >
+          <ArrowLeft className="h-6 w-6 text-gray-700" />
+        </button>
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-3">
+            <Settings className="h-8 w-8 text-indigo-600" />
+            Paramètres Entreprise
+          </h1>
+          <p className="text-gray-600 mt-1">Informations légales pour vos documents</p>
+        </div>
+      </div>
+
+      {/* Formulaire */}
+      <div className="max-w-4xl mx-auto">
+        <Card className="bg-white/90 backdrop-blur-xl rounded-3xl border-0 shadow-2xl">
+          <CardHeader className="border-b border-gray-100 pb-6">
+            <CardTitle className="text-xl font-semibold text-gray-900 flex items-center gap-2">
+              <Building className="h-6 w-6 text-indigo-600" />
+              Identité de l'entreprise
+            </CardTitle>
+            <p className="text-sm text-gray-500 mt-2">
+              Ces informations apparaîtront sur vos devis et factures
+            </p>
+          </CardHeader>
+          
+          <CardContent className="pt-6 space-y-6">
+            {/* Logo */}
+            <div className="flex items-start gap-6 p-5 bg-gray-50 rounded-xl">
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-3">
+                  Logo de l'entreprise
+                </label>
+                <div className="flex items-center gap-4">
+                  {logoPreview ? (
+                    <div className="relative">
+                      <img
+                        src={logoPreview}
+                        alt="Logo"
+                        className="w-32 h-32 object-contain border-2 border-gray-200 rounded-lg bg-white"
+                      />
+                      <button
+                        onClick={() => {
+                          setLogoFile(null);
+                          setLogoPreview(null);
+                          setCompanyInfo(prev => ({ ...prev, logo_url: '' }));
+                        }}
+                        className="absolute -top-2 -right-2 bg-red-500 text-white rounded-full p-1 hover:bg-red-600"
+                      >
+                        <X className="h-4 w-4" />
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="w-32 h-32 border-2 border-dashed border-gray-300 rounded-lg flex items-center justify-center bg-white">
+                      <ImageIcon className="h-12 w-12 text-gray-300" />
+                    </div>
+                  )}
+                  
+                  <label className="cursor-pointer">
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={handleLogoChange}
+                      className="hidden"
+                    />
+                    <div className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors flex items-center gap-2">
+                      <Upload className="h-4 w-4" />
+                      Choisir un logo
+                    </div>
+                  </label>
+                </div>
+                <p className="text-xs text-gray-500 mt-2">Format: PNG, JPG (max 2 MB)</p>
+              </div>
+            </div>
+
+            {/* Nom et forme juridique */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  Nom de l'entreprise <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={companyInfo.company_name}
+                  onChange={(e) => setCompanyInfo(prev => ({ ...prev, company_name: e.target.value }))}
+                  className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none"
+                  placeholder="Ex: SkyApp Solutions"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  Forme juridique <span className="text-red-500">*</span>
+                </label>
+                <select
+                  value={companyInfo.legal_form}
+                  onChange={(e) => setCompanyInfo(prev => ({ ...prev, legal_form: e.target.value }))}
+                  className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none bg-white"
+                >
+                  <option value="">Sélectionner...</option>
+                  {legalForms.map((form) => (
+                    <option key={form} value={form}>{form}</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* Adresse */}
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-2">
+                Adresse complète <span className="text-red-500">*</span>
+              </label>
+              <input
+                type="text"
+                value={companyInfo.address}
+                onChange={(e) => setCompanyInfo(prev => ({ ...prev, address: e.target.value }))}
+                className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none"
+                placeholder="Ex: 123 Rue de la République"
+              />
+            </div>
+
+            {/* Code postal et ville */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  Code postal <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={companyInfo.postal_code}
+                  onChange={(e) => setCompanyInfo(prev => ({ ...prev, postal_code: e.target.value }))}
+                  className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none"
+                  placeholder="Ex: 75001"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  Ville <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={companyInfo.city}
+                  onChange={(e) => setCompanyInfo(prev => ({ ...prev, city: e.target.value }))}
+                  className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none"
+                  placeholder="Ex: Paris"
+                />
+              </div>
+            </div>
+
+            {/* SIRET et SIREN */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  SIRET <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={companyInfo.siret}
+                  onChange={(e) => setCompanyInfo(prev => ({ ...prev, siret: e.target.value }))}
+                  className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none"
+                  placeholder="Ex: 123 456 789 00012"
+                  maxLength={14}
+                />
+                <p className="text-xs text-gray-500 mt-1">14 chiffres</p>
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  SIREN <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  value={companyInfo.siren}
+                  onChange={(e) => setCompanyInfo(prev => ({ ...prev, siren: e.target.value }))}
+                  className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none"
+                  placeholder="Ex: 123 456 789"
+                  maxLength={9}
+                />
+                <p className="text-xs text-gray-500 mt-1">9 chiffres</p>
+              </div>
+            </div>
+
+            {/* RCS/RM */}
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-2">
+                RCS ou RM (si artisan)
+              </label>
+              <input
+                type="text"
+                value={companyInfo.rcs_rm}
+                onChange={(e) => setCompanyInfo(prev => ({ ...prev, rcs_rm: e.target.value }))}
+                className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none"
+                placeholder="Ex: RCS Paris 123 456 789 ou RM 12345"
+              />
+              <p className="text-xs text-gray-500 mt-1">
+                Registre du Commerce et des Sociétés ou Répertoire des Métiers
+              </p>
+            </div>
+
+            {/* Boutons */}
+            <div className="flex gap-4 pt-4">
+              <Button
+                onClick={handleSave}
+                disabled={saving || !companyInfo.company_name || !companyInfo.legal_form}
+                className="flex-1 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white rounded-xl py-3 text-lg font-semibold disabled:opacity-50"
+              >
+                {saving ? (
+                  <>
+                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>
+                    Enregistrement...
+                  </>
+                ) : (
+                  <>
+                    <Save className="h-5 w-5 mr-2" />
+                    Enregistrer
+                  </>
+                )}
+              </Button>
+              
+              <Button
+                onClick={onBack}
+                variant="outline"
+                className="px-8 rounded-xl"
+              >
+                Retour
+              </Button>
+            </div>
+
+            {/* Note admin */}
+            <div className="mt-6 p-4 bg-amber-50 border-2 border-amber-200 rounded-xl">
+              <p className="text-sm text-amber-800 flex items-center gap-2">
+                <Shield className="h-4 w-4" />
+                <span className="font-semibold">Note :</span> Ces paramètres ne peuvent être modifiés que par les administrateurs.
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
+// SEARCH DETAILS MODAL - Affichage détaillé d'une recherche
+// ============================================================================
+
+const SearchDetailsModal = ({ search, onClose }) => {
+  const [photos, setPhotos] = useState([]);
+  const [photosBySection, setPhotosBySection] = useState({});
+  const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
+  const [currentLightboxPhotos, setCurrentLightboxPhotos] = useState([]);
+
+  useEffect(() => {
+    loadPhotos();
+  }, [search.id]);
+
+  const loadPhotos = async () => {
+    try {
+      const response = await axios.get(`${API}/searches/${search.id}/photos`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+      });
+      const allPhotos = response.data || [];
+      setPhotos(allPhotos);
+      
+      // Grouper les photos par section
+      const grouped = {};
+      allPhotos.forEach(photo => {
+        if (!photo.is_profile && photo.section_id) {
+          if (!grouped[photo.section_id]) {
+            grouped[photo.section_id] = [];
+          }
+          grouped[photo.section_id].push(photo);
+        }
+      });
+      setPhotosBySection(grouped);
+      console.log('📸 Photos groupées par section:', grouped);
+    } catch (error) {
+      console.error('Erreur chargement photos:', error);
+    }
+  };
+
+  const openLightbox = (index, photosArray) => {
+    setCurrentPhotoIndex(index);
+    setCurrentLightboxPhotos(photosArray);
+    setLightboxOpen(true);
+  };
+
+  const closeLightbox = () => {
+    setLightboxOpen(false);
+  };
+
+  const nextPhoto = () => {
+    setCurrentPhotoIndex((prev) => (prev + 1) % currentLightboxPhotos.length);
+  };
+
+  const prevPhoto = () => {
+    setCurrentPhotoIndex((prev) => (prev - 1 + currentLightboxPhotos.length) % currentLightboxPhotos.length);
+  };
+
+  // Parser les sections personnalisées depuis observations
+  let parsedSections = [];
+  console.log('🔍 [SearchDetailsModal] search.observations:', search.observations);
+  if (search.observations) {
+    try {
+      const observationsData = typeof search.observations === 'string' 
+        ? JSON.parse(search.observations) 
+        : search.observations;
+      
+      console.log('📦 [SearchDetailsModal] observationsData:', observationsData);
+      
+      if (observationsData.customSections && Array.isArray(observationsData.customSections)) {
+        parsedSections = observationsData.customSections;
+        console.log('✅ [SearchDetailsModal] Sections personnalisées trouvées:', parsedSections.length, parsedSections);
+      } else {
+        console.log('⚠️ [SearchDetailsModal] Pas de customSections dans observationsData');
+      }
+    } catch (e) {
+      console.error('❌ [SearchDetailsModal] Erreur parsing observations:', e);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+      <div className="bg-gradient-to-br from-gray-50 to-white rounded-2xl shadow-2xl w-full max-w-6xl h-[90vh] overflow-hidden flex flex-col">
+        {/* Header avec thème SkyApp */}
+        <div className="sticky top-0 bg-gradient-to-r from-gray-900 to-black text-white px-6 py-4 flex items-center justify-between z-10 shadow-lg border-b border-gray-800">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 bg-white bg-opacity-10 rounded-xl flex items-center justify-center border border-white border-opacity-20">
+              <Search size={20} />
+            </div>
+            <div>
+              <h2 className="text-lg font-bold">Détails de la recherche</h2>
+              <p className="text-gray-400 text-xs mt-0.5">
+                📅 {new Date(search.shared_at || search.created_at).toLocaleString('fr-FR')}
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-white hover:bg-white hover:bg-opacity-10 rounded-lg p-2 transition-colors"
+            aria-label="Fermer"
+          >
+            <X size={20} />
+          </button>
+        </div>
+
+        {/* Contenu avec sections organisées comme le formulaire */}
+        <div className="flex-1 overflow-y-auto p-6 space-y-4">
+          {/* Badges de statut */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className={`text-xs font-medium px-3 py-1.5 rounded-lg ${
+              search.search_type === 'TERRAIN' 
+                ? 'bg-blue-100 text-blue-800' 
+                : 'bg-orange-100 text-orange-800'
+            }`}>
+              {search.search_type === 'TERRAIN' ? '📍 Terrain' : '💧 Infiltration'}
+            </span>
+            <span className={`text-xs font-medium px-3 py-1.5 rounded-lg ${
+              search.status === 'SHARED' ? 'bg-green-100 text-green-800' :
+              search.status === 'ACTIVE' ? 'bg-blue-100 text-blue-800' :
+              search.status === 'DRAFT' ? 'bg-purple-100 text-purple-800' :
+              'bg-gray-100 text-gray-800'
+            }`}>
+              {search.status === 'SHARED' ? '✉️ Partagée' :
+               search.status === 'ACTIVE' ? '🔵 Active' :
+               search.status === 'DRAFT' ? '📝 Brouillon' :
+               search.status}
+            </span>
+            {search.project_id && (
+              <span className="text-xs font-medium px-3 py-1.5 rounded-lg bg-teal-100 text-teal-800">
+                🎯 Convertie en projet
+              </span>
+            )}
+          </div>
+
+          {/* Section Informations Générales */}
+          <div className="bg-white border border-gray-200 rounded-xl hover:border-gray-300 transition-all duration-200 hover:shadow-sm">
+            <div className="flex items-center gap-3 p-4 border-b border-gray-100">
+              <div className="w-10 h-10 bg-gray-900 rounded-lg flex items-center justify-center flex-shrink-0">
+                <User className="h-5 w-5 text-white" />
+              </div>
+              <h3 className="text-lg font-medium text-gray-900">Informations Générales</h3>
+            </div>
+            
+            <div className="p-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                {(search.nom || search.prenom) && (
+                  <div>
+                    <label className="text-xs font-medium text-gray-500 uppercase mb-1.5 block">Client</label>
+                    <div className="bg-gray-50 rounded-lg p-3 border border-gray-200">
+                      <p className="text-sm font-medium text-gray-900">
+                        👤 {search.prenom} {search.nom}
+                      </p>
+                    </div>
+                  </div>
+                )}
+                
+                <div>
+                  <label className="text-xs font-medium text-gray-500 uppercase mb-1.5 block flex items-center gap-1">
+                    <MapPin size={12} /> Localisation
+                  </label>
+                  <div className="bg-gray-50 rounded-lg p-3 border border-gray-200">
+                    <p className="text-sm font-medium text-gray-900">{search.location || 'Non spécifiée'}</p>
+                    {(search.latitude && search.longitude) && (
+                      <p className="text-xs text-gray-500 mt-1">
+                        📍 {search.latitude.toFixed(6)}, {search.longitude.toFixed(6)}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Section Description */}
+          {search.description && cleanObservations(search.description) && (
+            <div className="bg-white border border-gray-200 rounded-xl hover:border-gray-300 transition-all duration-200 hover:shadow-sm">
+              <div className="flex items-center gap-3 p-4 border-b border-gray-100">
+                <div className="w-10 h-10 bg-gray-900 rounded-lg flex items-center justify-center flex-shrink-0">
+                  <FileText className="h-5 w-5 text-white" />
+                </div>
+                <h3 className="text-lg font-medium text-gray-900">Description de la recherche</h3>
+              </div>
+              
+              <div className="p-4">
+                <p className="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">{cleanObservations(search.description)}</p>
+                
+                {/* Photos de la section Description */}
+                {photosBySection['description'] && photosBySection['description'].length > 0 && (
+                  <div className="mt-4 pt-4 border-t border-gray-100">
+                    <p className="text-xs font-medium text-gray-500 uppercase mb-2 flex items-center gap-1">
+                      <Camera size={12} /> Photos ({photosBySection['description'].length})
+                    </p>
+                    <div className="grid grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
+                      {photosBySection['description'].map((photo, index) => (
+                        <div
+                          key={photo.filename || index}
+                          className="group relative rounded-lg overflow-hidden cursor-pointer hover:shadow-lg transition-all duration-300 border border-gray-200 hover:border-gray-900"
+                          onClick={() => openLightbox(index, photosBySection['description'])}
+                          style={{ aspectRatio: '1/1' }}
+                        >
+                          <img
+                            src={photo.url || `${SUPABASE_URL}/storage/v1/object/public/${photo.storage_path}`}
+                            alt={`Photo ${index + 1}`}
+                            className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-300"
+                          />
+                          <div className="absolute inset-0 bg-gradient-to-t from-black/40 via-transparent to-transparent" />
+                          <div className="absolute bottom-1 left-1">
+                            <span className="text-white text-xs font-medium bg-black/60 px-1.5 py-0.5 rounded">#{index + 1}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Section Observations */}
+          {search.observations && cleanObservations(search.observations) && (
+            <div className="bg-white border border-gray-200 rounded-xl hover:border-gray-300 transition-all duration-200 hover:shadow-sm">
+              <div className="flex items-center gap-3 p-4 border-b border-gray-100">
+                <div className="w-10 h-10 bg-gray-900 rounded-lg flex items-center justify-center flex-shrink-0">
+                  <Eye className="h-5 w-5 text-white" />
+                </div>
+                <h3 className="text-lg font-medium text-gray-900">Observations et remarques</h3>
+              </div>
+              <p className="text-gray-700 whitespace-pre-wrap leading-relaxed">{cleanObservations(search.observations)}</p>
+              
+              {/* Photos de la section Observations */}
+              {photosBySection['observations'] && photosBySection['observations'].length > 0 && (
+                <div className="mt-4 pt-4 border-t border-amber-200">
+                  <p className="text-sm font-semibold text-gray-600 mb-3 flex items-center gap-2">
+                    <Camera size={14} /> Photos ({photosBySection['observations'].length})
+                  </p>
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+                    {photosBySection['observations'].map((photo, index) => (
+                      <div
+                        key={photo.filename || index}
+                        className="group relative rounded-lg overflow-hidden cursor-pointer hover:shadow-lg transition-all duration-300 border-2 border-amber-200 hover:border-amber-400"
+                        onClick={() => openLightbox(index, photosBySection['observations'])}
+                        style={{ aspectRatio: '1/1' }}
+                      >
+                        <img
+                          src={photo.url || `${SUPABASE_URL}/storage/v1/object/public/${photo.storage_path}`}
+                          alt={`Photo ${index + 1}`}
+                          className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-300"
+                        />
+                        <div className="absolute inset-0 bg-gradient-to-t from-black via-transparent to-transparent opacity-60" />
+                        <div className="absolute bottom-2 left-2">
+                          <span className="text-white text-xs font-bold bg-black bg-opacity-50 px-2 py-1 rounded-lg">#{index + 1}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Sections personnalisées avec style moderne */}
+          {parsedSections.length > 0 && parsedSections.map((section, idx) => (
+            <div key={idx} className="bg-white rounded-xl shadow-md p-6 border-2 border-purple-200">
+              <div className="flex items-center gap-3 mb-4">
+                <div className="w-10 h-10 bg-purple-600 rounded-lg flex items-center justify-center">
+                  <Plus className="h-5 w-5 text-white" />
+                </div>
+                <h3 className="text-lg font-bold text-gray-900">{section.title}</h3>
+              </div>
+              <p className="text-gray-700 whitespace-pre-wrap leading-relaxed">{cleanObservations(section.value)}</p>
+              
+              {/* Photos de cette section personnalisée */}
+              {photosBySection[section.id] && photosBySection[section.id].length > 0 && (
+                <div className="mt-4 pt-4 border-t border-purple-200">
+                  <p className="text-sm font-semibold text-gray-600 mb-3 flex items-center gap-2">
+                    <Camera size={14} /> Photos ({photosBySection[section.id].length})
+                  </p>
+                  <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+                    {photosBySection[section.id].map((photo, photoIndex) => (
+                      <div
+                        key={photo.filename || photoIndex}
+                        className="group relative rounded-lg overflow-hidden cursor-pointer hover:shadow-lg transition-all duration-300 border-2 border-purple-200 hover:border-purple-400"
+                        onClick={() => openLightbox(photoIndex, photosBySection[section.id])}
+                        style={{ aspectRatio: '1/1' }}
+                      >
+                        <img
+                          src={photo.url || `${SUPABASE_URL}/storage/v1/object/public/${photo.storage_path}`}
+                          alt={`Photo ${photoIndex + 1}`}
+                          className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-300"
+                        />
+                        <div className="absolute inset-0 bg-gradient-to-t from-black via-transparent to-transparent opacity-60" />
+                        <div className="absolute bottom-2 left-2">
+                          <span className="text-white text-xs font-bold bg-black bg-opacity-50 px-2 py-1 rounded-lg">#{photoIndex + 1}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+
+          {/* Section Envoyé par avec style moderne */}
+          <div className="bg-white rounded-xl shadow-md p-6 border-2 border-blue-200">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 bg-blue-600 rounded-lg flex items-center justify-center">
+                <User className="h-5 w-5 text-white" />
+              </div>
+              <h3 className="text-lg font-bold text-gray-900">Envoyé par</h3>
+            </div>
+            {search.users ? (
+              <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
+                <p className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                  👷 {search.users.first_name} {search.users.last_name}
+                </p>
+                {search.users.email && !search.users.email.includes('@temp-skyapp.local') && (
+                  <p className="text-sm text-gray-600 mt-2 flex items-center gap-2">
+                    📧 {search.users.email}
+                  </p>
+                )}
+              </div>
+            ) : (
+              <p className="text-gray-500 italic bg-gray-50 rounded-lg p-4">Technicien non identifié</p>
+            )}
+          </div>
+        </div>
+
+        {/* Footer avec bouton moderne */}
+        <div className="sticky bottom-0 bg-white p-6 border-t-2 border-gray-200 shadow-lg">
+          <button
+            onClick={onClose}
+            className="w-full bg-gradient-to-r from-gray-700 to-gray-900 text-white px-6 py-4 rounded-xl hover:from-gray-800 hover:to-black transition-all duration-300 font-bold text-lg shadow-lg hover:shadow-xl transform hover:scale-[1.02]"
+          >
+            Fermer
+          </button>
+        </div>
+      </div>
+
+      {/* Lightbox pour les photos */}
+      {lightboxOpen && photos.length > 0 && (
+        <div 
+          className="fixed inset-0 bg-black bg-opacity-90 flex items-center justify-center z-[60]"
+          onClick={(e) => {
+            if (e.target === e.currentTarget) {
+              closeLightbox();
+            }
+          }}
+        >
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              closeLightbox();
+            }}
+            className="absolute top-4 right-4 text-white hover:bg-white hover:bg-opacity-20 rounded-full p-2 transition-colors"
+          >
+            <X size={32} />
+          </button>
+          
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              prevPhoto();
+            }}
+            className="absolute left-4 text-white hover:bg-white hover:bg-opacity-20 rounded-full p-3 transition-colors"
+          >
+            <ChevronLeft size={40} />
+          </button>
+
+          <div className="max-w-5xl max-h-[90vh] flex flex-col items-center" onClick={(e) => e.stopPropagation()}>
+            <img
+              src={currentLightboxPhotos[currentPhotoIndex]?.url || `${SUPABASE_URL}/storage/v1/object/public/${currentLightboxPhotos[currentPhotoIndex]?.storage_path}`}
+              alt={`Photo ${currentPhotoIndex + 1}`}
+              className="max-w-full max-h-[85vh] object-contain rounded-lg"
+            />
+            <p className="text-white mt-4 text-lg">
+              {currentPhotoIndex + 1} / {currentLightboxPhotos.length}
+            </p>
+          </div>
+
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              nextPhoto();
+            }}
+            className="absolute right-4 text-white hover:bg-white hover:bg-opacity-20 rounded-full p-3 transition-colors"
+          >
+            <ChevronRight size={40} />
+          </button>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ============================================================================
+// EDIT SEARCH MODAL - Modal d'édition complet avec photos
+// ============================================================================
+
+const EditSearchModal = ({ search, onSave, onClose }) => {
+  const [formData, setFormData] = useState({
+    location: search.location || '',
+    description: search.description || '',
+    observations: search.observations || '',
+    client_id: search.client_id || null,
+    nom: search.nom || '',
+    prenom: search.prenom || '',
+    search_type: search.search_type || 'TERRAIN'
+  });
+  
+  // Sections avec leurs photos (style formulaire)
+  const [sections, setSections] = useState([
+    { 
+      id: 'general_info', 
+      title: 'Informations générales',
+      icon: User,
+      collapsed: false,
+      hasPhotos: false,
+      fields: [
+        { id: 'nom', label: 'Nom', type: 'text', value: search.nom || '' },
+        { id: 'prenom', label: 'Prénom', type: 'text', value: search.prenom || '' },
+        { id: 'client_id', label: 'Client récurrent', type: 'select', value: search.client_id || '' },
+        { id: 'adresse', label: 'Adresse', type: 'text', value: search.location || '', required: true }
+      ]
+    },
+    { 
+      id: 'description', 
+      title: 'Description de la recherche',
+      icon: FileText,
+      collapsed: false,
+      hasPhotos: true,
+      photos: [],
+      newPhotos: [],
+      fields: [
+        { id: 'description', label: 'Description', type: 'textarea', value: search.description || '', rows: 4 }
+      ]
+    },
+    { 
+      id: 'observations', 
+      title: 'Observations et remarques',
+      icon: Eye,
+      collapsed: false,
+      hasPhotos: true,
+      photos: [],
+      newPhotos: [],
+      fields: [
+        { id: 'observations', label: 'Observations', type: 'textarea', value: (() => {
+          try {
+            const data = JSON.parse(search.observations || '{}');
+            return data.text || '';
+          } catch (e) {
+            return search.observations || '';
+          }
+        })(), rows: 3 }
+      ]
+    }
+  ]);
+  
+  const [clients, setClients] = useState([]);
+  const [profilePhoto, setProfilePhoto] = useState(null);
+  const [profilePhotoPreview, setProfilePhotoPreview] = useState(null);
+  const [photosToDelete, setPhotosToDelete] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [lightboxOpen, setLightboxOpen] = useState(false);
+  const [lightboxImage, setLightboxImage] = useState(null);
+  const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
+  const [currentSection, setCurrentSection] = useState(null);
+
+  useEffect(() => {
+    loadClients();
+    loadPhotos();
+  }, []);
+
+  const loadClients = async () => {
+    try {
+      const response = await axios.get(`${API}/clients`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+      });
+      setClients(response.data || []);
+    } catch (error) {
+      console.error('Erreur chargement clients:', error);
+    }
+  };
+
+  const loadPhotos = async () => {
+    try {
+      console.log('🔍 Chargement photos pour recherche:', search.id);
+      const response = await axios.get(`${API}/searches/${search.id}/photos`, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+      });
+      console.log('✅ Photos API response:', response.data);
+      
+      const allPhotos = response.data || [];
+      
+      // Photo de profil
+      const profilePic = allPhotos.find(photo => photo.is_profile);
+      if (profilePic) {
+        setProfilePhotoPreview(profilePic.url || `${SUPABASE_URL}/storage/v1/object/public/${profilePic.storage_path}`);
+      }
+      
+      // Organiser les photos par section
+      setSections(prevSections => prevSections.map(section => {
+        if (!section.hasPhotos) return section;
+        
+        const sectionPhotos = allPhotos.filter(photo => 
+          !photo.is_profile && photo.section_id === section.id
+        );
+        
+        return { ...section, photos: sectionPhotos, newPhotos: [] };
+      }));
+    } catch (error) {
+      console.error('❌ Erreur chargement photos:', error);
+    }
+  };
+
+  const handleFieldChange = (sectionId, fieldId, value) => {
+    setSections(sections.map(s => {
+      if (s.id === sectionId) {
+        return {
+          ...s,
+          fields: s.fields.map(f => f.id === fieldId ? { ...f, value } : f)
+        };
+      }
+      return s;
+    }));
+  };
+
+  const toggleSection = (sectionId) => {
+    setSections(sections.map(s => 
+      s.id === sectionId ? { ...s, collapsed: !s.collapsed } : s
+    ));
+  };
+
+  const handleProfilePhotoChange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      setProfilePhoto(file);
+      setProfilePhotoPreview(URL.createObjectURL(file));
+    }
+  };
+
+  const handlePhotoAdd = (sectionId, e) => {
+    const files = Array.from(e.target.files);
+    
+    const photoUrls = files.map(file => ({
+      file,
+      url: URL.createObjectURL(file),
+      isNew: true,
+      section_id: sectionId
+    }));
+    
+    setSections(sections.map(s => 
+      s.id === sectionId 
+        ? { ...s, newPhotos: [...(s.newPhotos || []), ...photoUrls] }
+        : s
+    ));
+  };
+
+  const handlePhotoDelete = (sectionId, photo, isNew) => {
+    if (isNew) {
+      // Supprimer une nouvelle photo pas encore uploadée
+      URL.revokeObjectURL(photo.url);
+      setSections(sections.map(s => 
+        s.id === sectionId 
+          ? { ...s, newPhotos: s.newPhotos.filter(p => p.url !== photo.url) }
+          : s
+      ));
+    } else {
+      // Marquer une photo existante pour suppression
+      setPhotosToDelete([...photosToDelete, photo.filename || photo.storage_path]);
+      setSections(sections.map(s => 
+        s.id === sectionId 
+          ? { ...s, photos: s.photos.filter(p => p !== photo) }
+          : s
+      ));
+    }
+  };
+
+  const openLightbox = (sectionId, index) => {
+    setCurrentSection(sectionId);
+    setCurrentPhotoIndex(index);
+    setLightboxOpen(true);
+  };
+
+  const closeLightbox = () => {
+    setLightboxOpen(false);
+    setCurrentSection(null);
+  };
+
+  const nextPhoto = () => {
+    const section = sections.find(s => s.id === currentSection);
+    if (!section) return;
+    const totalPhotos = section.photos.length + section.newPhotos.length;
+    setCurrentPhotoIndex((prev) => (prev + 1) % totalPhotos);
+  };
+
+  const prevPhoto = () => {
+    const section = sections.find(s => s.id === currentSection);
+    if (!section) return;
+    const totalPhotos = section.photos.length + section.newPhotos.length;
+    setCurrentPhotoIndex((prev) => (prev - 1 + totalPhotos) % totalPhotos);
+  };
+
+  const getCurrentPhoto = () => {
+    const section = sections.find(s => s.id === currentSection);
+    if (!section) return null;
+    const allPhotos = [...section.photos, ...section.newPhotos];
+    return allPhotos[currentPhotoIndex];
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    
+    try {
+      // Construire les données depuis les sections
+      const generalSection = sections.find(s => s.id === 'general_info');
+      const descSection = sections.find(s => s.id === 'description');
+      const obsSection = sections.find(s => s.id === 'observations');
+      
+      const updatedData = {
+        nom: generalSection?.fields.find(f => f.id === 'nom')?.value || '',
+        prenom: generalSection?.fields.find(f => f.id === 'prenom')?.value || '',
+        client_id: generalSection?.fields.find(f => f.id === 'client_id')?.value || null,
+        location: generalSection?.fields.find(f => f.id === 'adresse')?.value || '',
+        description: descSection?.fields.find(f => f.id === 'description')?.value || '',
+        observations: obsSection?.fields.find(f => f.id === 'observations')?.value || '',
+        search_type: formData.search_type
+      };
+
+      // 1. Supprimer les photos marquées
+      for (const photoPath of photosToDelete) {
+        try {
+          await axios.delete(`${API}/searches/${search.id}/photos/${photoPath}`, {
+            headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+          });
+        } catch (err) {
+          console.error('Erreur suppression photo:', err);
+        }
+      }
+
+      // 2. Upload photo de profil si nouvelle
+      if (profilePhoto) {
+        const formDataProfile = new FormData();
+        formDataProfile.append('files', profilePhoto);
+        formDataProfile.append('is_profile', 'true');
+        formDataProfile.append('section_id', 'profile');
+
+        await axios.post(`${API}/searches/${search.id}/photos`, formDataProfile, {
+          headers: {
+            Authorization: `Bearer ${localStorage.getItem('token')}`,
+            'Content-Type': 'multipart/form-data'
+          }
+        });
+      }
+
+      // 3. Uploader les nouvelles photos par section
+      for (const section of sections) {
+        if (section.hasPhotos && section.newPhotos && section.newPhotos.length > 0) {
+          const formDataPhotos = new FormData();
+          section.newPhotos.forEach(photo => {
+            formDataPhotos.append('files', photo.file);
+          });
+          formDataPhotos.append('section_id', section.id);
+
+          await axios.post(`${API}/searches/${search.id}/photos`, formDataPhotos, {
+            headers: {
+              Authorization: `Bearer ${localStorage.getItem('token')}`,
+              'Content-Type': 'multipart/form-data'
+            }
+          });
+        }
+      }
+
+      // 4. Mettre à jour les données textuelles
+      await onSave(search.id, updatedData);
+      
+      alert('✅ Recherche modifiée avec succès !');
+      onClose();
+    } catch (error) {
+      console.error('Erreur sauvegarde:', error);
+      alert('❌ Erreur lors de la sauvegarde: ' + (error.response?.data?.detail || error.message));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto">
+        {/* Header */}
+        <div className="sticky top-0 bg-gradient-to-r from-indigo-600 to-purple-600 text-white p-6 rounded-t-xl flex items-center justify-between z-10">
+          <div>
+            <h2 className="text-2xl font-bold flex items-center gap-2">
+              <Edit2 size={28} />
+              Modifier la recherche
+            </h2>
+            <p className="text-indigo-100 text-sm mt-1">Correction par le bureau</p>
+          </div>
+          <button
+            onClick={onClose}
+            className="text-white hover:bg-white hover:bg-opacity-20 rounded-full p-2 transition-colors"
+          >
+            <X size={24} />
+          </button>
+        </div>
+
+        {/* Form */}
+        <form onSubmit={handleSubmit} className="p-6 space-y-4">
+          {/* Photo de profil */}
+          <div className="bg-gradient-to-r from-purple-50 to-pink-50 border-2 border-purple-200 rounded-xl p-4">
+            <h3 className="text-sm font-semibold text-gray-700 mb-3 flex items-center gap-2">
+              <User size={18} />
+              Photo de profil (optionnelle)
+            </h3>
+            
+            {profilePhotoPreview ? (
+              <div className="relative w-24 h-24 rounded-lg overflow-hidden border-2 border-dashed border-gray-300 group">
+                <img src={profilePhotoPreview} alt="Profil" className="w-full h-full object-cover" />
+                <button
+                  type="button"
+                  onClick={() => { setProfilePhoto(null); setProfilePhotoPreview(null); }}
+                  className="absolute inset-0 bg-black bg-opacity-50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center"
+                >
+                  <X size={24} className="text-white" />
+                </button>
+              </div>
+            ) : (
+              <div className="flex items-center gap-4">
+                <div className="w-24 h-24 rounded-lg border-2 border-dashed border-gray-300 flex items-center justify-center bg-gray-50">
+                  <User size={32} className="text-gray-400" />
+                </div>
+                <div>
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={handleProfilePhotoChange}
+                    id="profile-photo-edit"
+                    className="hidden"
+                  />
+                  <label
+                    htmlFor="profile-photo-edit"
+                    className="inline-flex items-center gap-2 bg-gray-800 text-white px-4 py-2 rounded-lg hover:bg-gray-900 cursor-pointer transition-colors text-sm"
+                  >
+                    <Camera size={16} />
+                    Choisir une photo
+                  </label>
+                  <p className="text-xs text-gray-500 mt-1">Formats acceptés: JPG, PNG, WebP (max 5MB)</p>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Sections dynamiques collapsibles */}
+          {sections.map((section) => {
+            const SectionIcon = section.icon;
+            const sectionPhotos = section.photos || [];
+            const sectionNewPhotos = section.newPhotos || [];
+            const totalPhotos = sectionPhotos.length + sectionNewPhotos.length;
+            
+            return (
+              <div key={section.id} className="bg-white border-2 border-gray-200 rounded-xl shadow-sm overflow-hidden">
+                {/* Section Header Collapsible */}
+                <button
+                  type="button"
+                  onClick={() => toggleSection(section.id)}
+                  className="w-full px-5 py-4 flex items-center justify-between bg-gradient-to-r from-gray-50 to-gray-100 hover:from-gray-100 hover:to-gray-150 transition-colors"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="bg-gray-800 p-2 rounded-lg">
+                      <SectionIcon size={20} className="text-white" />
+                    </div>
+                    <span className="font-semibold text-gray-900">{section.title}</span>
+                    {section.hasPhotos && totalPhotos > 0 && (
+                      <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-full font-medium">
+                        {totalPhotos} photo{totalPhotos > 1 ? 's' : ''}
+                      </span>
+                    )}
+                  </div>
+                  {section.collapsed ? <ChevronDown size={20} className="text-gray-600" /> : <ChevronUp size={20} className="text-gray-600" />}
+                </button>
+
+                {/* Section Content */}
+                {!section.collapsed && (
+                  <div className="p-5 space-y-4 bg-white">
+                    {/* Fields */}
+                    {section.fields && section.fields.map(field => (
+                      <div key={field.id}>
+                        <label className="block text-sm font-medium text-gray-700 mb-2">
+                          {field.label} {field.required && <span className="text-red-500">*</span>}
+                        </label>
+                        {field.type === 'select' ? (
+                          <select
+                            value={field.value}
+                            onChange={(e) => handleFieldChange(section.id, field.id, e.target.value)}
+                            className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                            required={field.required}
+                          >
+                            <option value="">Client occasionnel (pas de suivi)</option>
+                            {clients.map(client => (
+                              <option key={client.id} value={client.id}>
+                                {client.first_name} {client.last_name}
+                              </option>
+                            ))}
+                          </select>
+                        ) : field.type === 'textarea' ? (
+                          <textarea
+                            value={field.value}
+                            onChange={(e) => handleFieldChange(section.id, field.id, e.target.value)}
+                            rows={field.rows || 3}
+                            className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent resize-none"
+                            required={field.required}
+                            placeholder={field.placeholder || `Décrivez le contenu de cette section...`}
+                          />
+                        ) : (
+                          <input
+                            type={field.type}
+                            value={field.value}
+                            onChange={(e) => handleFieldChange(section.id, field.id, e.target.value)}
+                            className="w-full px-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                            required={field.required}
+                            placeholder={field.placeholder || `Saisissez ${field.label.toLowerCase()}...`}
+                          />
+                        )}
+                      </div>
+                    ))}
+
+                    {/* Photos de cette section */}
+                    {section.hasPhotos && (
+                      <div className="mt-6 pt-4 border-t border-gray-200">
+                        <div className="flex items-center justify-between mb-3">
+                          <label className="text-sm font-medium text-gray-700">Photos de cette section</label>
+                          <input
+                            type="file"
+                            multiple
+                            accept="image/*"
+                            onChange={(e) => handlePhotoAdd(section.id, e)}
+                            id={`photos-${section.id}`}
+                            className="hidden"
+                          />
+                          <label
+                            htmlFor={`photos-${section.id}`}
+                            className="inline-flex items-center gap-2 bg-indigo-600 text-white px-3 py-1.5 rounded-lg hover:bg-indigo-700 cursor-pointer transition-colors text-sm"
+                          >
+                            <Camera size={16} />
+                            Ajouter des photos
+                          </label>
+                        </div>
+
+                        {totalPhotos > 0 ? (
+                          <div className="grid grid-cols-3 gap-3">
+                            {sectionPhotos.map((photo, idx) => (
+                              <div key={`existing-${idx}`} className="relative aspect-square rounded-lg overflow-hidden group border border-gray-200">
+                                <img
+                                  src={photo.url || `${SUPABASE_URL}/storage/v1/object/public/${photo.storage_path}`}
+                                  alt={`Photo ${idx + 1}`}
+                                  className="w-full h-full object-cover cursor-pointer hover:opacity-90 transition-opacity"
+                                  onClick={() => openLightbox(section.id, idx)}
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => handlePhotoDelete(section.id, photo, false)}
+                                  className="absolute top-2 right-2 bg-red-600 text-white rounded-full p-1.5 opacity-0 group-hover:opacity-100 transition-opacity shadow-lg"
+                                >
+                                  <X size={14} />
+                                </button>
+                              </div>
+                            ))}
+                            {sectionNewPhotos.map((photo, idx) => (
+                              <div key={`new-${idx}`} className="relative aspect-square rounded-lg overflow-hidden group border-2 border-green-500">
+                                <img
+                                  src={photo.url}
+                                  alt={`Nouvelle ${idx + 1}`}
+                                  className="w-full h-full object-cover cursor-pointer hover:opacity-90 transition-opacity"
+                                  onClick={() => openLightbox(section.id, sectionPhotos.length + idx)}
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => handlePhotoDelete(section.id, photo, true)}
+                                  className="absolute top-2 right-2 bg-red-600 text-white rounded-full p-1.5 opacity-0 group-hover:opacity-100 transition-opacity shadow-lg"
+                                >
+                                  <X size={14} />
+                                </button>
+                                <div className="absolute bottom-2 left-2 bg-green-600 text-white text-xs px-2 py-1 rounded-md font-medium shadow">
+                                  Nouveau
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="text-center py-8 bg-gray-50 rounded-lg border-2 border-dashed border-gray-300">
+                            <Camera size={32} className="mx-auto text-gray-400 mb-2" />
+                            <p className="text-sm text-gray-500">Aucune photo ajoutée pour cette section</p>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+
+          {/* Info */}
+          <div className="bg-amber-50 border-2 border-amber-200 rounded-xl p-4">
+            <p className="text-sm text-amber-800 flex items-center gap-2">
+              <AlertCircle size={16} />
+              <span>Les modifications seront visibles immédiatement pour le technicien.</span>
+            </p>
+          </div>
+
+          {/* Buttons */}
+          <div className="flex gap-3 pt-4">
+            <button
+              type="button"
+              onClick={onClose}
+              className="flex-1 bg-gray-200 text-gray-700 px-6 py-3 rounded-lg hover:bg-gray-300 transition-colors font-medium"
+            >
+              Annuler
+            </button>
+            <button
+              type="submit"
+              disabled={loading}
+              className="flex-1 bg-gradient-to-r from-indigo-600 to-purple-600 text-white px-6 py-3 rounded-lg hover:from-indigo-700 hover:to-purple-700 transition-colors font-medium disabled:opacity-50 flex items-center justify-center gap-2"
+            >
+              {loading ? (
+                <>
+                  <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                  Enregistrement...
+                </>
+              ) : (
+                <>
+                  <Save size={20} />
+                  Enregistrer
+                </>
+              )}
+            </button>
+          </div>
+        </form>
+      </div>
+
+      {/* Lightbox */}
+      {lightboxOpen && currentSection && (() => {
+        const section = sections.find(s => s.id === currentSection);
+        const allPhotos = section ? [...section.photos, ...section.newPhotos] : [];
+        const currentPhoto = allPhotos[currentPhotoIndex];
+        
+        return allPhotos.length > 0 && currentPhoto ? (
+          <div 
+            className="fixed inset-0 bg-black bg-opacity-95 flex items-center justify-center z-[60]"
+            onClick={(e) => {
+              if (e.target === e.currentTarget) {
+                closeLightbox();
+              }
+            }}
+          >
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                closeLightbox();
+              }}
+              className="absolute top-4 right-4 text-white hover:bg-white hover:bg-opacity-20 rounded-full p-2 transition-colors"
+            >
+              <X size={32} />
+            </button>
+            
+            {allPhotos.length > 1 && (
+              <>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    prevPhoto();
+                  }}
+                  className="absolute left-4 text-white hover:bg-white hover:bg-opacity-20 rounded-full p-3 transition-colors"
+                >
+                  <ChevronLeft size={40} />
+                </button>
+
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    nextPhoto();
+                  }}
+                  className="absolute right-4 text-white hover:bg-white hover:bg-opacity-20 rounded-full p-3 transition-colors"
+                >
+                  <ChevronRight size={40} />
+                </button>
+              </>
+            )}
+
+            <div className="max-w-5xl max-h-[90vh] flex flex-col items-center" onClick={(e) => e.stopPropagation()}>
+              <img
+                src={
+                  currentPhoto.file
+                    ? currentPhoto.url
+                    : (currentPhoto.url || `${SUPABASE_URL}/storage/v1/object/public/${currentPhoto.storage_path}`)
+                }
+                alt={`${section.title} ${currentPhotoIndex + 1}`}
+                className="max-w-full max-h-[85vh] object-contain rounded-lg"
+              />
+              <p className="text-white mt-4 text-lg">
+                {section.title} - Photo {currentPhotoIndex + 1} / {allPhotos.length}
+              </p>
+            </div>
+          </div>
+        ) : null;
+      })()}
+    </div>
+  );
+};
+
+// ============================================================================
+// BUREAU SEARCHES VIEW - Recherches partagées par les techniciens
+// ============================================================================
+
+const BureauSearchesView = () => {
+  const [searches, setSearches] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [filterType, setFilterType] = useState('ALL'); // 'ALL', 'TERRAIN', 'INFILTRATION'
+  const [statusFilter, setStatusFilter] = useState('ALL'); // 'ALL', 'SHARED', 'ACTIVE', 'DRAFT', 'CONVERTED'
+  const [convertedSearches, setConvertedSearches] = useState(new Set()); // Track converted searches
+  const [selectedSearch, setSelectedSearch] = useState(null);
+  const [isDetailsModalOpen, setIsDetailsModalOpen] = useState(false);
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+
+  useEffect(() => {
+    loadSearches();
+  }, [statusFilter]);
+
+  const loadSearches = async () => {
+    try {
+      let url = `${API}/searches`;
+      
+      // Charger selon le filtre de statut
+      if (statusFilter === 'SHARED') {
+        url = `${API}/reports/bureau-searches`;
+      } else if (statusFilter === 'ACTIVE') {
+        url = `${API}/searches?status=ACTIVE`;
+      } else if (statusFilter === 'DRAFT') {
+        url = `${API}/searches?status=DRAFT`;
+      } else if (statusFilter === 'CONVERTED') {
+        // Récupérer les recherches qui ont été converties en projet
+        url = `${API}/searches?converted=true`;
+      } else {
+        // ALL : charger toutes les recherches
+        url = `${API}/searches`;
+      }
+      
+      const response = await axios.get(url, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+      });
+      
+      const searchList = statusFilter === 'SHARED' ? response.data.searches : response.data;
+      setSearches(searchList || []);
+    } catch (error) {
+      console.error('Erreur chargement recherches bureau:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleViewDetails = (search) => {
+    setSelectedSearch(search);
+    setIsDetailsModalOpen(true);
+  };
+
+  const handleEdit = (search) => {
+    setSelectedSearch(search);
+    setIsEditModalOpen(true);
+  };
+
+  const handleCloseDetailsModal = () => {
+    setIsDetailsModalOpen(false);
+    setSelectedSearch(null);
+  };
+
+  const handleCloseEditModal = () => {
+    setIsEditModalOpen(false);
+    setSelectedSearch(null);
+    loadSearches(); // Recharger les recherches après édition
+  };
+
+  const handleSaveEdit = async (searchId, payload) => {
+    try {
+      await axios.put(`${API}/searches/${searchId}`, payload, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+      });
+    } catch (error) {
+      console.error('Erreur sauvegarde recherche:', error);
+      throw error;
+    }
+  };
+
+  // Déterminer le type de recherche depuis la base de données
+  const getSearchType = (search) => {
+    // Utiliser directement le champ search_type de la DB
+    if (search.search_type) return search.search_type.toUpperCase();
+    
+    // Fallback : Heuristique basée sur les données (pour anciennes recherches)
+    const desc = (search.description || '').toLowerCase();
+    if (desc.includes('infiltration') || desc.includes('perméabilité') || desc.includes('test')) {
+      return 'INFILTRATION';
+    }
+    return 'TERRAIN';
+  };
+
+  const filteredSearches = searches.filter(search => {
+    if (filterType === 'ALL') return true;
+    return getSearchType(search) === filterType;
+  });
+
+  const terrainCount = searches.filter(s => getSearchType(s) === 'TERRAIN').length;
+  const infiltrationCount = searches.filter(s => getSearchType(s) === 'INFILTRATION').length;
+  
+  // Compter par statut
+  const sharedCount = searches.filter(s => s.status === 'SHARED').length;
+  const activeCount = searches.filter(s => s.status === 'ACTIVE').length;
+  const draftCount = searches.filter(s => s.status === 'DRAFT').length;
+  const convertedCount = searches.filter(s => s.project_id).length;
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-gray-900"></div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {/* Header */}
+      <div>
+        <h1 className="text-3xl font-bold text-gray-900 mb-2">🔍 Gestion des Recherches</h1>
+        <p className="text-gray-600">Toutes les recherches : brouillons, actives, partagées et converties</p>
+      </div>
+
+      {/* Filtres de Statut */}
+      <div className="bg-white rounded-xl shadow-sm p-4 border border-gray-200">
+        <h3 className="text-sm font-semibold text-gray-500 uppercase mb-3">Filtrer par statut</h3>
+        <div className="flex flex-wrap gap-2">
+          <button
+            onClick={() => setStatusFilter('ALL')}
+            className={`px-4 py-2 rounded-lg font-medium transition-all text-sm ${
+              statusFilter === 'ALL'
+                ? 'bg-gray-900 text-white shadow-md'
+                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+            }`}
+          >
+            📋 Toutes ({searches.length})
+          </button>
+          <button
+            onClick={() => setStatusFilter('SHARED')}
+            className={`px-4 py-2 rounded-lg font-medium transition-all text-sm ${
+              statusFilter === 'SHARED'
+                ? 'bg-green-600 text-white shadow-md'
+                : 'bg-green-50 text-green-700 hover:bg-green-100'
+            }`}
+          >
+            ✉️ Partagées ({sharedCount})
+          </button>
+          <button
+            onClick={() => setStatusFilter('ACTIVE')}
+            className={`px-4 py-2 rounded-lg font-medium transition-all text-sm ${
+              statusFilter === 'ACTIVE'
+                ? 'bg-blue-600 text-white shadow-md'
+                : 'bg-blue-50 text-blue-700 hover:bg-blue-100'
+            }`}
+          >
+            🔵 Actives ({activeCount})
+          </button>
+          <button
+            onClick={() => setStatusFilter('DRAFT')}
+            className={`px-4 py-2 rounded-lg font-medium transition-all text-sm ${
+              statusFilter === 'DRAFT'
+                ? 'bg-purple-600 text-white shadow-md'
+                : 'bg-purple-50 text-purple-700 hover:bg-purple-100'
+            }`}
+          >
+            📝 Brouillons ({draftCount})
+          </button>
+          <button
+            onClick={() => setStatusFilter('CONVERTED')}
+            className={`px-4 py-2 rounded-lg font-medium transition-all text-sm ${
+              statusFilter === 'CONVERTED'
+                ? 'bg-teal-600 text-white shadow-md'
+                : 'bg-teal-50 text-teal-700 hover:bg-teal-100'
+            }`}
+          >
+            🎯 Converties en projet ({convertedCount})
+          </button>
+        </div>
+      </div>
+
+      {/* Filtres de Type */}
+      <div className="bg-white rounded-xl shadow-sm p-4 border border-gray-200">
+        <h3 className="text-sm font-semibold text-gray-500 uppercase mb-3">Filtrer par type</h3>
+        <div className="flex gap-3">
+          <button
+            onClick={() => setFilterType('ALL')}
+            className={`px-6 py-3 rounded-lg font-medium transition-all ${
+              filterType === 'ALL'
+                ? 'bg-gray-900 text-white shadow-md'
+                : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+            }`}
+          >
+            📋 Tous types ({searches.length})
+          </button>
+          <button
+            onClick={() => setFilterType('TERRAIN')}
+            className={`px-6 py-3 rounded-lg font-medium transition-all flex items-center gap-2 ${
+              filterType === 'TERRAIN'
+                ? 'bg-blue-600 text-white shadow-md'
+                : 'bg-blue-50 text-blue-700 hover:bg-blue-100'
+            }`}
+          >
+            <MapPin size={18} />
+            Terrain ({terrainCount})
+          </button>
+          <button
+            onClick={() => setFilterType('INFILTRATION')}
+            className={`px-6 py-3 rounded-lg font-medium transition-all flex items-center gap-2 ${
+              filterType === 'INFILTRATION'
+                ? 'bg-orange-600 text-white shadow-md'
+                : 'bg-orange-50 text-orange-700 hover:bg-orange-100'
+            }`}
+          >
+            <Layers size={18} />
+            Infiltration ({infiltrationCount})
+          </button>
+        </div>
+      </div>
+
+      {/* Grid en 2 colonnes : Terrain à gauche, Infiltration à droite */}
+      <div className="grid grid-cols-2 gap-6">
+        {/* Colonne Terrain */}
+        <div>
+          <h2 className="text-xl font-bold text-blue-900 mb-4 flex items-center gap-2">
+            <MapPin className="text-blue-600" size={24} />
+            Recherches Terrain ({terrainCount})
+          </h2>
+          <div className="space-y-4">
+            {searches.filter(s => getSearchType(s) === 'TERRAIN').length === 0 ? (
+              <div className="bg-blue-50 border-2 border-dashed border-blue-200 rounded-xl p-8 text-center">
+                <MapPin className="h-12 w-12 mx-auto mb-3 text-blue-300" />
+                <p className="text-blue-600 font-medium">Aucune recherche terrain</p>
+              </div>
+            ) : (
+              searches.filter(s => getSearchType(s) === 'TERRAIN').map(search => (
+                <div key={search.id} className="bg-white border-2 border-blue-200 rounded-xl p-5 hover:shadow-lg transition-all relative">
+                  {/* Badge converti en projet */}
+                  {search.project_id && (
+                    <div className="absolute -top-2 -right-2 z-10">
+                      <span className="bg-teal-600 text-white text-xs font-bold px-3 py-1 rounded-full shadow-lg flex items-center gap-1">
+                        🎯 Projet créé
+                      </span>
+                    </div>
+                  )}
+                  
+                  <div className="flex items-start justify-between mb-3">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <MapPin className="text-blue-600" size={20} />
+                      <span className="text-xs font-medium bg-blue-100 text-blue-700 px-2 py-1 rounded-full">
+                        Terrain
+                      </span>
+                      <span className="text-xs font-medium px-2 py-1 rounded-full bg-indigo-100 text-indigo-700 flex items-center gap-1">
+                        <User size={12} />
+                        {search.users ? `${search.users.first_name} ${search.users.last_name}` : 'Technicien'}
+                      </span>
+                      {search.status && (
+                        <span className={`text-xs font-medium px-2 py-1 rounded-full ${
+                          search.status === 'SHARED' ? 'bg-green-100 text-green-700' :
+                          search.status === 'ACTIVE' ? 'bg-blue-100 text-blue-700' :
+                          search.status === 'DRAFT' ? 'bg-purple-100 text-purple-700' :
+                          'bg-gray-100 text-gray-700'
+                        }`}>
+                          {search.status === 'SHARED' ? '✉️ Partagée' :
+                           search.status === 'ACTIVE' ? '🔵 Active' :
+                           search.status === 'DRAFT' ? '📝 Brouillon' :
+                           search.status}
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-xs text-gray-500">
+                      {new Date(search.shared_at || search.created_at).toLocaleString('fr-FR', { 
+                        day: '2-digit', 
+                        month: '2-digit', 
+                        year: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit'
+                      })}
+                    </span>
+                  </div>
+                  
+                  {/* Client info */}
+                  {(search.nom || search.prenom) && (
+                    <div className="mb-3 p-2 bg-blue-50 rounded-lg">
+                      <p className="text-sm font-semibold text-blue-900">
+                        👤 {search.prenom} {search.nom}
+                      </p>
+                    </div>
+                  )}
+                  
+                  {/* Location */}
+                  <h3 className="font-bold text-gray-900 mb-2 flex items-start gap-2">
+                    <MapPin size={16} className="text-blue-600 mt-1 flex-shrink-0" />
+                    <span>{search.location || 'Sans adresse'}</span>
+                  </h3>
+                  
+                  {/* Description */}
+                  {search.description && (
+                    <div className="mb-3">
+                      <p className="text-xs font-semibold text-gray-500 mb-1">Description :</p>
+                      <p className="text-sm text-gray-700 line-clamp-3">{search.description}</p>
+                    </div>
+                  )}
+                  
+                  {/* Observations */}
+                  {search.observations && cleanObservations(search.observations) && (
+                    <div className="mb-3 p-2 bg-amber-50 border border-amber-200 rounded-lg">
+                      <p className="text-xs font-semibold text-amber-700 mb-1">📝 Observations :</p>
+                      <p className="text-sm text-gray-700 line-clamp-2">{cleanObservations(search.observations)}</p>
+                    </div>
+                  )}
+                  
+                  {/* Boutons d'action */}
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => handleViewDetails(search)}
+                      className="flex-1 flex items-center justify-center gap-2 bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 transition-colors text-sm font-medium"
+                    >
+                      <Eye size={16} />
+                      Détails
+                    </button>
+                    <button
+                      onClick={() => !search.project_id && handleEdit(search)}
+                      disabled={!!search.project_id}
+                      className={`flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg transition-colors text-sm font-medium ${
+                        search.project_id
+                          ? 'bg-gray-400 text-gray-200 cursor-not-allowed'
+                          : 'bg-gray-700 text-white hover:bg-gray-800'
+                      }`}
+                      title={search.project_id ? 'Projet déjà créé - modification désactivée' : 'Modifier la recherche'}
+                    >
+                      <Edit2 size={16} />
+                      Modifier
+                    </button>
+                    <button
+                      onClick={async () => {
+                        try {
+                          const response = await fetch(`${API}/searches/${search.id}/pdf`, {
+                            headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+                          });
+                          if (!response.ok) throw new Error('Erreur génération PDF');
+                          const blob = await response.blob();
+                          const url = window.URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = `recherche_${search.location || search.id}.pdf`;
+                          document.body.appendChild(a);
+                          a.click();
+                          window.URL.revokeObjectURL(url);
+                          document.body.removeChild(a);
+                        } catch (error) {
+                          alert('❌ Erreur lors de la génération du PDF');
+                          console.error(error);
+                        }
+                      }}
+                      className="flex items-center justify-center gap-2 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition-colors text-sm font-medium"
+                      title="Télécharger en PDF"
+                    >
+                      <Download size={16} />
+                      PDF
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Colonne Infiltration */}
+        <div>
+          <h2 className="text-xl font-bold text-orange-900 mb-4 flex items-center gap-2">
+            <Layers className="text-orange-600" size={24} />
+            Recherches Infiltration ({infiltrationCount})
+          </h2>
+          <div className="space-y-4">
+            {searches.filter(s => getSearchType(s) === 'INFILTRATION').length === 0 ? (
+              <div className="bg-orange-50 border-2 border-dashed border-orange-200 rounded-xl p-8 text-center">
+                <Layers className="h-12 w-12 mx-auto mb-3 text-orange-300" />
+                <p className="text-orange-600 font-medium">Aucune recherche d'infiltration</p>
+              </div>
+            ) : (
+              searches.filter(s => getSearchType(s) === 'INFILTRATION').map(search => (
+                <div key={search.id} className="bg-white border-2 border-orange-200 rounded-xl p-5 hover:shadow-lg transition-all relative">
+                  {/* Badge converti en projet */}
+                  {search.project_id && (
+                    <div className="absolute -top-2 -right-2 z-10">
+                      <span className="bg-teal-600 text-white text-xs font-bold px-3 py-1 rounded-full shadow-lg flex items-center gap-1">
+                        🎯 Projet créé
+                      </span>
+                    </div>
+                  )}
+                  
+                  <div className="flex items-start justify-between mb-3">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <Layers className="text-orange-600" size={20} />
+                      <span className="text-xs font-medium bg-orange-100 text-orange-700 px-2 py-1 rounded-full">
+                        Infiltration
+                      </span>
+                      <span className="text-xs font-medium px-2 py-1 rounded-full bg-indigo-100 text-indigo-700 flex items-center gap-1">
+                        <User size={12} />
+                        {search.users ? `${search.users.first_name} ${search.users.last_name}` : 'Technicien'}
+                      </span>
+                      {search.status && (
+                        <span className={`text-xs font-medium px-2 py-1 rounded-full ${
+                          search.status === 'SHARED' ? 'bg-green-100 text-green-700' :
+                          search.status === 'ACTIVE' ? 'bg-blue-100 text-blue-700' :
+                          search.status === 'DRAFT' ? 'bg-purple-100 text-purple-700' :
+                          'bg-gray-100 text-gray-700'
+                        }`}>
+                          {search.status === 'SHARED' ? '✉️ Partagée' :
+                           search.status === 'ACTIVE' ? '🔵 Active' :
+                           search.status === 'DRAFT' ? '📝 Brouillon' :
+                           search.status}
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-xs text-gray-500">
+                      {new Date(search.shared_at || search.created_at).toLocaleString('fr-FR', { 
+                        day: '2-digit', 
+                        month: '2-digit', 
+                        year: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit'
+                      })}
+                    </span>
+                  </div>
+                  
+                  {/* Client info */}
+                  {(search.nom || search.prenom) && (
+                    <div className="mb-3 p-2 bg-orange-50 rounded-lg">
+                      <p className="text-sm font-semibold text-orange-900">
+                        👤 {search.prenom} {search.nom}
+                      </p>
+                    </div>
+                  )}
+                  
+                  {/* Location */}
+                  <h3 className="font-bold text-gray-900 mb-2 flex items-start gap-2">
+                    <MapPin size={16} className="text-orange-600 mt-1 flex-shrink-0" />
+                    <span>{search.location || 'Sans adresse'}</span>
+                  </h3>
+                  
+                  {/* Description */}
+                  {search.description && (
+                    <div className="mb-3">
+                      <p className="text-xs font-semibold text-gray-500 mb-1">Description :</p>
+                      <p className="text-sm text-gray-700 line-clamp-3">{search.description}</p>
+                    </div>
+                  )}
+                  
+                  {/* Observations */}
+                  {search.observations && cleanObservations(search.observations) && (
+                    <div className="mb-3 p-2 bg-amber-50 border border-amber-200 rounded-lg">
+                      <p className="text-xs font-semibold text-amber-700 mb-1">📝 Observations :</p>
+                      <p className="text-sm text-gray-700 line-clamp-2">{cleanObservations(search.observations)}</p>
+                    </div>
+                  )}
+                  
+                  {/* Boutons d'action */}
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => handleViewDetails(search)}
+                      className="flex-1 flex items-center justify-center gap-2 bg-orange-600 text-white px-4 py-2 rounded-lg hover:bg-orange-700 transition-colors text-sm font-medium"
+                    >
+                      <Eye size={16} />
+                      Détails
+                    </button>
+                    <button
+                      onClick={() => !search.project_id && handleEdit(search)}
+                      disabled={!!search.project_id}
+                      className={`flex-1 flex items-center justify-center gap-2 px-4 py-2 rounded-lg transition-colors text-sm font-medium ${
+                        search.project_id
+                          ? 'bg-gray-400 text-gray-200 cursor-not-allowed'
+                          : 'bg-gray-700 text-white hover:bg-gray-800'
+                      }`}
+                      title={search.project_id ? 'Projet déjà créé - modification désactivée' : 'Modifier la recherche'}
+                    >
+                      <Edit2 size={16} />
+                      Modifier
+                    </button>
+                    <button
+                      onClick={async () => {
+                        try {
+                          const response = await fetch(`${API}/searches/${search.id}/pdf`, {
+                            headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+                          });
+                          if (!response.ok) throw new Error('Erreur génération PDF');
+                          const blob = await response.blob();
+                          const url = window.URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = `recherche_${search.location || search.id}.pdf`;
+                          document.body.appendChild(a);
+                          a.click();
+                          window.URL.revokeObjectURL(url);
+                          document.body.removeChild(a);
+                        } catch (error) {
+                          alert('❌ Erreur lors de la génération du PDF');
+                          console.error(error);
+                        }
+                      }}
+                      className="flex items-center justify-center gap-2 bg-green-600 text-white px-4 py-2 rounded-lg hover:bg-green-700 transition-colors text-sm font-medium"
+                      title="Télécharger en PDF"
+                    >
+                      <Download size={16} />
+                      PDF
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Message si aucune recherche */}
+      {searches.length === 0 && (
+        <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-12 text-center">
+          <Search className="h-16 w-16 mx-auto mb-4 text-gray-300" />
+          <h3 className="text-xl font-semibold text-gray-900 mb-2">Aucune recherche partagée</h3>
+          <p className="text-gray-500">
+            Les recherches envoyées par les techniciens apparaîtront ici
+          </p>
+        </div>
+      )}
+      
+      {/* Modal Détails */}
+      {isDetailsModalOpen && selectedSearch && (
+        <SearchDetailsModal 
+          search={selectedSearch} 
+          onClose={handleCloseDetailsModal}
+        />
+      )}
+      
+      {/* Modal Édition */}
+      {isEditModalOpen && selectedSearch && (
+        <EditSearchModal 
+          search={selectedSearch} 
+          onSave={handleSaveEdit}
+          onClose={handleCloseEditModal}
+        />
+      )}
+    </div>
+  );
+};
+
+// ============================================================================
+// PROJECTS HUB - Mon Entreprise
+// ============================================================================
+
+const ProjectsHub = () => {
+  const navigate = useNavigate();
+  const [projects, setProjects] = useState([]);
+  const [searches, setSearches] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [openFolder, setOpenFolder] = useState(null); // null, 'projects', 'searches'
+  const [stats, setStats] = useState(null);
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [showProjectDetails, setShowProjectDetails] = useState(false);
+  const [selectedProject, setSelectedProject] = useState(null);
+  const [showQuoteModal, setShowQuoteModal] = useState(false);
+  const [selectedProjectForQuote, setSelectedProjectForQuote] = useState(null);
+  const [clients, setClients] = useState([]);
+  const [searchTerm, setSearchTerm] = useState('');
+  const [convertedSearches, setConvertedSearches] = useState(new Set());
+  const [selectedSearch, setSelectedSearch] = useState(null);
+  const [isDetailsModalOpen, setIsDetailsModalOpen] = useState(false);
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [searchToConvert, setSearchToConvert] = useState(null); // Recherche en cours de conversion
+  const [newQuote, setNewQuote] = useState({
+    title: '',
+    amount_ht: '',
+    tva: '20',
+    valid_until: '',
+    deadline: '',
+    description: '',
+    conditions: ''
+  });
+  const [newProject, setNewProject] = useState({
+    name: '',
+    client_id: '',
+    status: 'RECHERCHE',
+    priority: 'NORMAL',
+    category: '',
+    estimated_value: '',
+    start_date: '',
+    notes: ''
+  });
+
+  useEffect(() => {
+    loadClients();
+    loadProjects();
+    loadSearches();
+    loadStats();
+  }, []);
+
+  // Ouvrir le modal de création quand on arrive sur les projets avec une recherche à convertir
+  useEffect(() => {
+    if (openFolder === 'projects' && searchToConvert) {
+      console.log('Ouverture du modal pour recherche:', searchToConvert.id);
+      const timer = setTimeout(() => {
+        setShowCreateModal(true);
+      }, 200);
+      return () => clearTimeout(timer);
+    }
+  }, [openFolder, searchToConvert]);
+
+  const loadProjects = async () => {
+    try {
+      setLoading(true);
+      const response = await axios.get(`${API}/projects`);
+      setProjects(response.data.data || []);
+    } catch (error) {
+      console.error('Erreur chargement projets:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadSearches = async () => {
+    try {
+      const response = await axios.get(`${API}/searches?status=SHARED`);
+      const searches = response.data.data || [];
+      
+      // Récupérer les infos des utilisateurs pour chaque recherche
+      const searchesWithUsers = await Promise.all(
+        searches.map(async (search) => {
+          if (search.user_id) {
+            try {
+              const userResponse = await axios.get(
+                `${API}/users/${search.user_id}`,
+                { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } }
+              );
+              return { ...search, users: userResponse.data };
+            } catch (error) {
+              console.error(`❌ Impossible de charger l'utilisateur ${search.user_id}:`, error.response?.status, error.response?.data);
+              return search;
+            }
+          }
+          console.warn('⚠️ Recherche sans user_id:', search.id);
+          return search;
+        })
+      );
+      
+      // Initialiser convertedSearches avec les recherches qui ont déjà un project_id
+      const converted = new Set(
+        searchesWithUsers
+          .filter(search => search.project_id)
+          .map(search => search.id)
+      );
+      setConvertedSearches(converted);
+      
+      setSearches(searchesWithUsers);
+    } catch (error) {
+      console.error('Erreur chargement recherches:', error);
+    }
+  };
+
+  const loadStats = async () => {
+    try {
+      const response = await axios.get(`${API}/projects/stats/dashboard`);
+      setStats(response.data);
+    } catch (error) {
+      console.error('Erreur chargement stats:', error);
+    }
+  };
+
+  const loadClients = async () => {
+    try {
+      const response = await axios.get(`${API}/clients`);
+      setClients(response.data || []);
+    } catch (error) {
+      console.error('Erreur chargement clients:', error);
+    }
+  };
+
+  const handleViewDetails = (search) => {
+    setSelectedSearch(search);
+    setIsDetailsModalOpen(true);
+  };
+
+  const handleEdit = (search) => {
+    setSelectedSearch(search);
+    setIsEditModalOpen(true);
+  };
+
+  const handleCloseDetailsModal = () => {
+    setIsDetailsModalOpen(false);
+    setSelectedSearch(null);
+  };
+
+  const handleCloseEditModal = () => {
+    setIsEditModalOpen(false);
+    setSelectedSearch(null);
+    loadSearches();
+  };
+
+  const handleSaveEdit = async (searchId, updatedData) => {
+    try {
+      await axios.put(`${API}/searches/${searchId}`, updatedData, {
+        headers: { Authorization: `Bearer ${localStorage.getItem('token')}` }
+      });
+      loadSearches();
+    } catch (error) {
+      console.error('Erreur sauvegarde:', error);
+      throw error;
+    }
+  };
+
+  const handleDeleteProject = async (projectId) => {
+    if (!window.confirm('⚠️ Êtes-vous sûr de vouloir supprimer ce projet ?')) return;
+    
+    try {
+      await axios.delete(`${API}/projects/${projectId}`);
+      loadProjects();
+      loadStats();
+      alert('✅ Projet supprimé');
+    } catch (error) {
+      console.error('Erreur suppression:', error);
+      alert('❌ Erreur lors de la suppression');
+    }
+  };
+
+  const handleCreateQuote = (project) => {
+    console.log('🔵 Création devis pour projet:', project);
+    // Naviguer vers la page de création de devis avec les données du projet
+    navigate('/bureau/devis', { 
+      state: { 
+        fromProject: true,
+        project: project,
+        client_id: project.client_id 
+      } 
+    });
+  };
+
+  const handleCreateQuoteSubmit = async () => {
+    try {
+      if (!newQuote.title || !newQuote.amount_ht) {
+        alert('⚠️ Veuillez remplir au moins le titre et le montant HT');
+        return;
+      }
+
+      const amountHT = parseFloat(newQuote.amount_ht);
+      const tvaRate = parseFloat(newQuote.tva);
+      const amountTTC = amountHT * (1 + tvaRate / 100);
+
+      const quoteData = {
+        client_id: selectedProjectForQuote.client_id,
+        title: newQuote.title,
+        description: `${newQuote.description || ''}\n\n--- Détails ---\nMontant HT: ${amountHT.toFixed(2)}€\nTVA: ${tvaRate}%\nMontant TTC: ${amountTTC.toFixed(2)}€\nValable jusqu'au: ${newQuote.valid_until || 'Non spécifié'}\nDélai: ${newQuote.deadline || 'Non spécifié'}\nConditions: ${newQuote.conditions || 'Aucune'}`,
+        amount: amountTTC,
+        status: 'DRAFT',
+        items: []
+      };
+
+      const response = await axios.post(`${API}/quotes`, quoteData);
+      
+      if (response.data) {
+        // Mettre à jour le projet avec le quote_id
+        await axios.put(`${API}/projects/${selectedProjectForQuote.id}`, {
+          quote_id: response.data.id,
+          status: 'DEVIS_EN_COURS'
+        });
+
+        alert('✅ Devis créé avec succès !');
+        setShowQuoteModal(false);
+        loadProjects(); // Recharger les projets pour voir le devis lié
+      }
+    } catch (error) {
+      console.error('Erreur création devis:', error);
+      alert('❌ Erreur lors de la création du devis: ' + (error.response?.data?.detail || error.message));
+    }
+  };
+
+  const handleCreateProject = async () => {
+    try {
+      // Validation : nom requis, client requis SAUF si conversion avec nom/prénom
+      const hasClientInfo = searchToConvert && (searchToConvert.nom || searchToConvert.prenom);
+      if (!newProject.name || (!newProject.client_id && !hasClientInfo)) {
+        alert('Veuillez remplir au moins le nom' + (hasClientInfo ? '' : ' et le client'));
+        return;
+      }
+
+      // Si c'est une conversion de recherche, utiliser l'endpoint de conversion
+      if (searchToConvert) {
+        console.log('Conversion de recherche en projet...', searchToConvert.id);
+        const response = await axios.post(
+          `${API}/searches/${searchToConvert.id}/convert-to-project`,
+          {
+            project_data: {
+              ...newProject,
+              estimated_value: newProject.estimated_value ? parseFloat(newProject.estimated_value) : null
+            }
+          },
+          { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } }
+        );
+        
+        console.log('Reponse conversion:', response.data);
+        
+        // Marquer comme converti seulement si le projet a été créé
+        if (response.data.project || response.data.project_id) {
+          setConvertedSearches(prev => new Set([...prev, searchToConvert.id]));
+        }
+        
+        alert(`✅ ${response.data.message || 'Projet créé avec succès !'}`);
+        setSearchToConvert(null); // Réinitialiser
+      } else {
+        // Création normale de projet
+        console.log('Creation nouveau projet...');
+        const response = await axios.post(`${API}/projects`, {
+          ...newProject,
+          estimated_value: newProject.estimated_value ? parseFloat(newProject.estimated_value) : null
+        });
+        console.log('Projet cree:', response.data);
+        alert('✅ Projet créé avec succès !');
+      }
+
+      setShowCreateModal(false);
+      setNewProject({
+        name: '',
+        client_id: '',
+        status: 'RECHERCHE',
+        priority: 'NORMAL',
+        category: '',
+        estimated_value: '',
+        start_date: '',
+        notes: ''
+      });
+      
+      // Recharger toutes les données
+      await loadProjects();
+      await loadStats();
+      await loadSearches(); // Important: Recharger les recherches pour mettre à jour l'état
+    } catch (error) {
+      console.error('Erreur creation projet:', error);
+      console.error('Details erreur:', error.response?.data);
+      alert(`❌ ${error.response?.data?.detail || error.response?.data?.message || 'Erreur lors de la création du projet'}`);
+    }
+  };
+
+  const getStatusBadge = (status) => {
+    const badges = {
+      'RECHERCHE': { bg: 'bg-blue-100', text: 'text-blue-800', label: '🔍 Recherche' },
+      'DEVIS_EN_COURS': { bg: 'bg-yellow-100', text: 'text-yellow-800', label: '📝 Devis en cours' },
+      'DEVIS_VALIDE': { bg: 'bg-green-100', text: 'text-green-800', label: '✅ Devis validé' },
+      'CHANTIER_EN_COURS': { bg: 'bg-orange-100', text: 'text-orange-800', label: '🏗️ Chantier en cours' },
+      'FACTURE': { bg: 'bg-emerald-100', text: 'text-emerald-800', label: '💰 Facturé' },
+      'CHANTIER_TERMINE': { bg: 'bg-purple-100', text: 'text-purple-800', label: '🎉 Terminé' },
+      'ARCHIVE': { bg: 'bg-gray-100', text: 'text-gray-600', label: '📦 Archivé' }
+    };
+    const badge = badges[status] || badges['RECHERCHE'];
+    return (
+      <span className={`px-3 py-1 rounded-full text-xs font-medium ${badge.bg} ${badge.text}`}>
+        {badge.label}
+      </span>
+    );
+  };
+
+  const getPriorityIcon = (priority) => {
+    if (priority === 'URGENT') return <AlertCircle className="h-4 w-4 text-red-500" />;
+    if (priority === 'HIGH') return <TrendingUp className="h-4 w-4 text-orange-500" />;
+    return null;
+  };
+
+  // Vue Bureau ou Dossier
+  if (openFolder === 'projects') {
+    return (
+      <div className="min-h-screen bg-gray-50 p-6">
+        {/* Header Dossier Projets */}
+        <div className="mb-6">
+          <button
+            onClick={() => setOpenFolder(null)}
+            className="flex items-center gap-2 text-gray-600 hover:text-gray-900 mb-4"
+          >
+            <ArrowLeft className="h-5 w-5" />
+            Retour au bureau
+          </button>
+          
+          <div className="flex items-center justify-between">
+            <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-3">
+              <FolderOpen className="h-8 w-8 text-blue-500" />
+              Projets ({projects.length})
+            </h1>
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setShowCreateModal(true);
+              }}
+              className="flex items-center gap-2 px-4 py-2 bg-black text-white rounded-lg hover:bg-gray-800 transition"
+            >
+              <Plus className="h-5 w-5" />
+              Nouveau Projet
+            </button>
+          </div>
+        </div>
+
+        {/* Barre de recherche dans Projets */}
+        <div className="mb-4 max-w-xl">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+            <input
+              type="text"
+              placeholder="Rechercher dans les projets..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full pl-10 pr-10 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+            />
+            {searchTerm && (
+              <button
+                onClick={() => setSearchTerm('')}
+                className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Liste des Projets */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {projects.filter(project => {
+            if (!searchTerm) return true;
+            const search = searchTerm.toLowerCase();
+            const client = clients.find(c => c.id === project.client_id);
+            const clientName = client ? `${client.nom} ${client.prenom}`.toLowerCase() : '';
+            return (
+              project.name?.toLowerCase().includes(search) ||
+              project.project_number?.toLowerCase().includes(search) ||
+              clientName.includes(search) ||
+              project.description?.toLowerCase().includes(search)
+            );
+          }).map(project => {
+            const client = clients.find(c => c.id === project.client_id);
+            return (
+              <div key={project.id} className="bg-white rounded-lg border-2 border-gray-200 hover:border-blue-500 transition p-4 shadow-sm">
+                {/* En-tête projet */}
+                <div className="flex items-start justify-between mb-3">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2 mb-1">
+                      <FileText className="h-5 w-5 text-blue-500" />
+                      <span className="text-xs font-mono text-gray-500">{project.project_number}</span>
+                    </div>
+                    <h3 className="font-bold text-gray-900 text-sm line-clamp-2">{project.name}</h3>
+                    {client && (
+                      <p className="text-xs text-gray-600 mt-1">
+                        👤 {client.nom} {client.prenom}
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => handleDeleteProject(project.id)}
+                    className="text-gray-400 hover:text-red-500 transition"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </button>
+                </div>
+
+                {/* Statut */}
+                <div className="mb-3">
+                  {getStatusBadge(project.status)}
+                </div>
+
+                {/* Montant */}
+                {project.estimated_value && (
+                  <div className="text-sm text-gray-600 mb-3">
+                    💰 {parseFloat(project.estimated_value).toLocaleString('fr-FR')}€
+                  </div>
+                )}
+
+                {/* Timeline */}
+                <div className="flex items-center gap-1 mb-3 text-xs">
+                  <div className={`w-3 h-3 rounded-full ${project.search_id ? 'bg-green-500' : 'bg-gray-300'}`} title="Recherche"></div>
+                  <div className="h-0.5 flex-1 bg-gray-200"></div>
+                  <div className="w-3 h-3 rounded-full bg-blue-500" title="Projet (actuel)"></div>
+                  <div className="h-0.5 flex-1 bg-gray-200"></div>
+                  <div className={`w-3 h-3 rounded-full ${project.quote_id ? 'bg-green-500' : 'bg-gray-300'}`} title="Devis"></div>
+                  <div className="h-0.5 flex-1 bg-gray-200"></div>
+                  <div className={`w-3 h-3 rounded-full ${project.worksite_id ? 'bg-green-500' : 'bg-gray-300'}`} title="Chantier"></div>
+                  <div className="h-0.5 flex-1 bg-gray-200"></div>
+                  <div className={`w-3 h-3 rounded-full ${project.report_id ? 'bg-green-500' : 'bg-gray-300'}`} title="Rapport"></div>
+                </div>
+
+                {/* Actions */}
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => {
+                      setSelectedProject(project);
+                      setShowProjectDetails(true);
+                    }}
+                    className="flex items-center justify-center gap-1 px-3 py-2 bg-gray-100 text-gray-700 text-xs rounded hover:bg-gray-200 transition"
+                    title="Voir détails et modifier"
+                  >
+                    <Eye className="h-3 w-3" />
+                    Détails
+                  </button>
+                  {!project.quote_id && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (!project.client_id) {
+                          alert('⚠️ Ce projet n\'a pas de client assigné. Veuillez d\'abord ajouter un client.');
+                          return;
+                        }
+                        handleCreateQuote(project);
+                      }}
+                      className="flex-1 flex items-center justify-center gap-1 px-3 py-2 bg-blue-500 text-white text-xs rounded hover:bg-blue-600 transition"
+                    >
+                      <FileText className="h-3 w-3" />
+                      Créer Devis
+                    </button>
+                  )}
+                  {project.quote_id && !project.worksite_id && (
+                    <button
+                      className="flex-1 px-3 py-2 bg-orange-500 text-white text-xs rounded hover:bg-orange-600 transition"
+                    >
+                      🏗️ Créer Chantier
+                    </button>
+                  )}
+                  {project.worksite_id && !project.report_id && (
+                    <button
+                      className="flex-1 px-3 py-2 bg-purple-500 text-white text-xs rounded hover:bg-purple-600 transition"
+                    >
+                      📄 Générer Rapport
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {projects.length === 0 && (
+          <div className="text-center py-12 bg-white rounded-lg border-2 border-dashed border-gray-300">
+            <FolderOpen className="h-16 w-16 text-gray-300 mx-auto mb-4" />
+            <p className="text-gray-500">Aucun projet dans ce dossier</p>
+          </div>
+        )}
+
+        {/* Modal Création Projet */}
+        {showCreateModal && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-lg max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+              <div className="p-6 border-b border-gray-200 flex items-center justify-between sticky top-0 bg-white">
+                <h2 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
+                  <Plus className="h-6 w-6" />
+                  Nouveau Projet
+                </h2>
+                <button
+                  onClick={() => {
+                    setShowCreateModal(false);
+                    setSearchToConvert(null);
+                  }}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <X className="h-6 w-6" />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-4">
+                {/* Nom du projet */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Nom du projet <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={newProject.name}
+                    onChange={(e) => setNewProject({...newProject, name: e.target.value})}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    placeholder="Ex: Rénovation cuisine M. Dupont"
+                  />
+                </div>
+
+                {/* Client */}
+                {searchToConvert && (searchToConvert.nom || searchToConvert.prenom) ? (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Client (non récurrent)
+                    </label>
+                    <div className="w-full px-4 py-2 border border-gray-200 rounded-lg bg-blue-50 text-gray-700">
+                      👤 {searchToConvert.prenom || ''} {searchToConvert.nom || ''}
+                      {searchToConvert.location && (
+                        <span className="text-sm text-gray-500 ml-2">• {searchToConvert.location}</span>
+                      )}
+                    </div>
+                    <p className="text-xs text-blue-600 mt-1">
+                      ℹ️ Ce client ne sera pas ajouté à votre liste de clients récurrents
+                    </p>
+                  </div>
+                ) : (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Client <span className="text-red-500">*</span>
+                    </label>
+                    <select
+                      value={newProject.client_id}
+                      onChange={(e) => setNewProject({...newProject, client_id: e.target.value})}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    >
+                      <option value="">Sélectionner un client</option>
+                      {clients.map(client => (
+                        <option key={client.id} value={client.id}>
+                          {client.nom} {client.prenom} {client.entreprise ? `- ${client.entreprise}` : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {/* Status et Priorité */}
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Statut
+                    </label>
+                    <select
+                      value={newProject.status}
+                      onChange={(e) => setNewProject({...newProject, status: e.target.value})}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    >
+                      <option value="RECHERCHE">🔍 Recherche</option>
+                      <option value="DEVIS_EN_COURS">📝 Devis en cours</option>
+                      <option value="DEVIS_VALIDE">✅ Devis validé</option>
+                      <option value="CHANTIER_EN_COURS">🏗️ Chantier en cours</option>
+                      <option value="FACTURE">💰 Facturé</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Priorité
+                    </label>
+                    <select
+                      value={newProject.priority}
+                      onChange={(e) => setNewProject({...newProject, priority: e.target.value})}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    >
+                      <option value="LOW">🟢 Basse</option>
+                      <option value="NORMAL">🔵 Normale</option>
+                      <option value="HIGH">🟠 Haute</option>
+                      <option value="URGENT">🔴 Urgente</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* Catégorie */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Catégorie
+                  </label>
+                  <input
+                    type="text"
+                    value={newProject.category}
+                    onChange={(e) => setNewProject({...newProject, category: e.target.value})}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    placeholder="Ex: Électricité, Plomberie, Général..."
+                  />
+                </div>
+
+                {/* Valeur estimée et Date de début */}
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Montant estimé (€)
+                    </label>
+                    <input
+                      type="number"
+                      value={newProject.estimated_value}
+                      onChange={(e) => setNewProject({...newProject, estimated_value: e.target.value})}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      placeholder="0"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Date de début estimée
+                    </label>
+                    <input
+                      type="date"
+                      value={newProject.start_date}
+                      onChange={(e) => setNewProject({...newProject, start_date: e.target.value})}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    />
+                  </div>
+                </div>
+
+                {/* Notes */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Notes
+                  </label>
+                  <textarea
+                    value={newProject.notes}
+                    onChange={(e) => setNewProject({...newProject, notes: e.target.value})}
+                    rows="3"
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    placeholder="Notes supplémentaires..."
+                  />
+                </div>
+              </div>
+
+              {/* Boutons d'action */}
+              <div className="p-6 border-t border-gray-200 flex gap-3 justify-end sticky bottom-0 bg-white">
+                <button
+                  onClick={() => {
+                    setShowCreateModal(false);
+                    setSearchToConvert(null);
+                  }}
+                  className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition"
+                >
+                  Annuler
+                </button>
+                <button
+                  onClick={handleCreateProject}
+                  className="flex items-center gap-2 px-6 py-2 bg-black text-white rounded-lg hover:bg-gray-800 transition"
+                >
+                  <Check className="h-5 w-5" />
+                  Créer le projet
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Modal Détails Projet */}
+        {showProjectDetails && selectedProject && (
+          <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+            <div className="bg-white rounded-lg max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+              <div className="p-6 border-b border-gray-200 flex items-center justify-between sticky top-0 bg-white">
+                <h2 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
+                  <Eye className="h-6 w-6" />
+                  Détails du Projet
+                </h2>
+                <button
+                  onClick={() => {
+                    setShowProjectDetails(false);
+                    setSelectedProject(null);
+                  }}
+                  className="text-gray-400 hover:text-gray-600"
+                >
+                  <X className="h-6 w-6" />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-6">
+                {/* Informations principales */}
+                <div className="bg-gray-50 p-4 rounded-lg">
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="text-xs font-medium text-gray-500">Numéro de projet</label>
+                      <p className="text-sm font-mono text-gray-900">{selectedProject.project_number}</p>
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium text-gray-500">Statut</label>
+                      <div className="mt-1">{getStatusBadge(selectedProject.status)}</div>
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium text-gray-500">Priorité</label>
+                      <p className="text-sm text-gray-900 flex items-center gap-1">
+                        {getPriorityIcon(selectedProject.priority)}
+                        {selectedProject.priority}
+                      </p>
+                    </div>
+                    <div>
+                      <label className="text-xs font-medium text-gray-500">Catégorie</label>
+                      <p className="text-sm text-gray-900">{selectedProject.category || 'Non définie'}</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Nom du projet - Éditable */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Nom du projet</label>
+                  <input
+                    type="text"
+                    value={selectedProject.name}
+                    onChange={(e) => setSelectedProject({...selectedProject, name: e.target.value})}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
+                </div>
+
+                {/* Client */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Client</label>
+                  <select
+                    value={selectedProject.client_id || ''}
+                    onChange={(e) => setSelectedProject({...selectedProject, client_id: e.target.value})}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  >
+                    <option value="">Sélectionner un client</option>
+                    {clients.map(client => (
+                      <option key={client.id} value={client.id}>
+                        {client.nom} {client.prenom} {client.is_recurring === false ? '(Non récurrent)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Statut - Éditable */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Statut</label>
+                  <select
+                    value={selectedProject.status}
+                    onChange={(e) => setSelectedProject({...selectedProject, status: e.target.value})}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  >
+                    <option value="RECHERCHE">🔍 Recherche</option>
+                    <option value="DEVIS_EN_COURS">📝 Devis en cours</option>
+                    <option value="DEVIS_VALIDE">✅ Devis validé</option>
+                    <option value="CHANTIER_EN_COURS">🏗️ Chantier en cours</option>
+                    <option value="CHANTIER_TERMINE">🎉 Chantier terminé</option>
+                    <option value="FACTURE">💰 Facturé</option>
+                    <option value="ARCHIVE">📦 Archivé</option>
+                  </select>
+                </div>
+
+                {/* Priorité - Éditable */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Priorité</label>
+                  <select
+                    value={selectedProject.priority}
+                    onChange={(e) => setSelectedProject({...selectedProject, priority: e.target.value})}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  >
+                    <option value="LOW">Faible</option>
+                    <option value="NORMAL">Normale</option>
+                    <option value="HIGH">Haute</option>
+                    <option value="URGENT">Urgente</option>
+                  </select>
+                </div>
+
+                {/* Catégorie - Éditable */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Catégorie</label>
+                  <input
+                    type="text"
+                    value={selectedProject.category || ''}
+                    onChange={(e) => setSelectedProject({...selectedProject, category: e.target.value})}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    placeholder="Ex: Infiltration, Terrain, etc."
+                  />
+                </div>
+
+                {/* Montant estimé - Éditable */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Montant estimé (€)</label>
+                  <input
+                    type="number"
+                    value={selectedProject.estimated_value || ''}
+                    onChange={(e) => setSelectedProject({...selectedProject, estimated_value: e.target.value})}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    placeholder="2000"
+                  />
+                </div>
+
+                {/* Date de début - Éditable */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Date de début estimée</label>
+                  <input
+                    type="date"
+                    value={selectedProject.start_date || ''}
+                    onChange={(e) => setSelectedProject({...selectedProject, start_date: e.target.value})}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
+                </div>
+
+                {/* Timeline du cycle de vie */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-3">Cycle de vie du projet</label>
+                  <div className="flex items-center gap-1">
+                    {/* Recherche/Infiltration */}
+                    <button
+                      onClick={async () => {
+                        if (selectedProject.search_id) {
+                          try {
+                            const response = await axios.get(
+                              `${API}/searches/${selectedProject.search_id}`,
+                              { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } }
+                            );
+                            setShowProjectDetails(false);
+                            setSelectedProject(null);
+                            setOpenFolder('searches');
+                            setSelectedSearch(response.data);
+                            setIsDetailsModalOpen(true);
+                          } catch (error) {
+                            console.error('Erreur chargement recherche:', error);
+                            alert('❌ Impossible de charger la recherche');
+                          }
+                        }
+                      }}
+                      disabled={!selectedProject.search_id}
+                      className={`flex-1 flex flex-col items-center gap-2 p-3 rounded-lg transition ${
+                        selectedProject.search_id 
+                          ? 'bg-green-50 border-2 border-green-500 hover:bg-green-100 cursor-pointer' 
+                          : 'bg-gray-50 border-2 border-gray-200 cursor-not-allowed'
+                      }`}
+                    >
+                      <Search className={`h-5 w-5 ${selectedProject.search_id ? 'text-green-600' : 'text-gray-400'}`} />
+                      <span className="text-xs font-medium text-center">Recherche</span>
+                    </button>
+                    <div className="text-gray-400">→</div>
+                    
+                    {/* Projet (Toujours actif) */}
+                    <div className="flex-1 flex flex-col items-center gap-2 p-3 rounded-lg bg-blue-50 border-2 border-blue-500">
+                      <Briefcase className="h-5 w-5 text-blue-600" />
+                      <span className="text-xs font-medium text-center">Projet</span>
+                    </div>
+                    <div className="text-gray-400">→</div>
+                    
+                    {/* Devis */}
+                    <button
+                      onClick={() => {
+                        if (selectedProject.quote_id) {
+                          setShowProjectDetails(false);
+                          setSelectedProject(null);
+                          setMenuSection('devis');
+                          alert('📄 Redirection vers la section Devis');
+                        }
+                      }}
+                      disabled={!selectedProject.quote_id}
+                      className={`flex-1 flex flex-col items-center gap-2 p-3 rounded-lg transition ${
+                        selectedProject.quote_id 
+                          ? 'bg-green-50 border-2 border-green-500 hover:bg-green-100 cursor-pointer' 
+                          : 'bg-gray-50 border-2 border-gray-200 cursor-not-allowed'
+                      }`}
+                    >
+                      <FileText className={`h-5 w-5 ${selectedProject.quote_id ? 'text-green-600' : 'text-gray-400'}`} />
+                      <span className="text-xs font-medium text-center">Devis</span>
+                    </button>
+                    <div className="text-gray-400">→</div>
+                    
+                    {/* Chantier */}
+                    <button
+                      onClick={() => {
+                        if (selectedProject.worksite_id) {
+                          setShowProjectDetails(false);
+                          setSelectedProject(null);
+                          setMenuSection('chantiers');
+                          alert('🏗️ Redirection vers la section Chantiers');
+                        }
+                      }}
+                      disabled={!selectedProject.worksite_id}
+                      className={`flex-1 flex flex-col items-center gap-2 p-3 rounded-lg transition ${
+                        selectedProject.worksite_id 
+                          ? 'bg-green-50 border-2 border-green-500 hover:bg-green-100 cursor-pointer' 
+                          : 'bg-gray-50 border-2 border-gray-200 cursor-not-allowed'
+                      }`}
+                    >
+                      <Briefcase className={`h-5 w-5 ${selectedProject.worksite_id ? 'text-green-600' : 'text-gray-400'}`} />
+                      <span className="text-xs font-medium text-center">Chantier</span>
+                    </button>
+                    <div className="text-gray-400">→</div>
+                    
+                    {/* Rapport */}
+                    <button
+                      onClick={() => {
+                        if (selectedProject.report_id) {
+                          alert('📄 Navigation vers les rapports à venir');
+                          // TODO: Implémenter la navigation vers les rapports
+                        }
+                      }}
+                      disabled={!selectedProject.report_id}
+                      className={`flex-1 flex flex-col items-center gap-2 p-3 rounded-lg transition ${
+                        selectedProject.report_id 
+                          ? 'bg-green-50 border-2 border-green-500 hover:bg-green-100 cursor-pointer' 
+                          : 'bg-gray-50 border-2 border-gray-200 cursor-not-allowed'
+                      }`}
+                    >
+                      <FileText className={`h-5 w-5 ${selectedProject.report_id ? 'text-green-600' : 'text-gray-400'}`} />
+                      <span className="text-xs font-medium text-center">Rapport</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* Dates de création/modification */}
+                <div className="bg-gray-50 p-4 rounded-lg">
+                  <div className="grid grid-cols-2 gap-4 text-xs text-gray-600">
+                    <div>
+                      <span className="font-medium">Créé le:</span> {new Date(selectedProject.created_at).toLocaleString('fr-FR')}
+                    </div>
+                    {selectedProject.updated_at && (
+                      <div>
+                        <span className="font-medium">Modifié le:</span> {new Date(selectedProject.updated_at).toLocaleString('fr-FR')}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Actions */}
+                <div className="flex gap-3 pt-4 border-t border-gray-200">
+                  <button
+                    onClick={() => {
+                      setShowProjectDetails(false);
+                      setSelectedProject(null);
+                    }}
+                    className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition"
+                  >
+                    Annuler
+                  </button>
+                  <button
+                    onClick={async () => {
+                      try {
+                        await axios.put(
+                          `${API}/projects/${selectedProject.id}`,
+                          selectedProject,
+                          { headers: { Authorization: `Bearer ${localStorage.getItem('token')}` } }
+                        );
+                        alert('✅ Projet modifié avec succès');
+                        await loadProjects();
+                        setShowProjectDetails(false);
+                        setSelectedProject(null);
+                      } catch (error) {
+                        console.error('Erreur modification:', error);
+                        alert('❌ Erreur lors de la modification');
+                      }
+                    }}
+                    className="flex items-center gap-2 px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition"
+                  >
+                    <Check className="h-5 w-5" />
+                    Enregistrer
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (openFolder === 'searches') {
+    return (
+      <div className="min-h-screen bg-gray-50 p-6">
+        {/* Header Dossier Recherches */}
+        <div className="mb-6">
+          <button
+            onClick={() => setOpenFolder(null)}
+            className="flex items-center gap-2 text-gray-600 hover:text-gray-900 mb-4"
+          >
+            <ArrowLeft className="h-5 w-5" />
+            Retour au bureau
+          </button>
+          
+          <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-3">
+            <Search className="h-8 w-8 text-orange-500" />
+            Recherches Techniciens ({searches.length})
+          </h1>
+          <p className="text-gray-600 mt-1">Recherches partagées par les techniciens</p>
+        </div>
+
+        {/* Barre de recherche dans Recherches */}
+        <div className="mb-4 max-w-xl">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+            <input
+              type="text"
+              placeholder="Rechercher dans les recherches..."
+              value={searchTerm}
+              onChange={(e) => setSearchTerm(e.target.value)}
+              className="w-full pl-10 pr-10 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+            />
+            {searchTerm && (
+              <button
+                onClick={() => setSearchTerm('')}
+                className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            )}
+          </div>
+        </div>
+
+        {/* Liste des Recherches */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+          {searches.filter(search => {
+            if (!searchTerm) return true;
+            const searchLower = searchTerm.toLowerCase();
+            return (
+              search.location?.toLowerCase().includes(searchLower) ||
+              search.search_type?.toLowerCase().includes(searchLower) ||
+              search.description?.toLowerCase().includes(searchLower) ||
+              search.nom?.toLowerCase().includes(searchLower) ||
+              search.prenom?.toLowerCase().includes(searchLower)
+            );
+          }).map(search => {
+            const searchType = search.search_type?.toUpperCase() || 'TERRAIN';
+            const isInfiltration = searchType === 'INFILTRATION';
+            const isConverted = !!search.project_id || convertedSearches.has(search.id);
+            
+            return (
+              <div 
+                key={search.id} 
+                className={`bg-white rounded-lg border-2 hover:shadow-lg transition-all p-5 ${
+                  isInfiltration ? 'border-orange-200 hover:border-orange-500' : 'border-blue-200 hover:border-blue-500'
+                }`}
+              >
+                {/* Header avec type et date */}
+                <div className="flex items-start justify-between mb-3">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {isInfiltration ? (
+                      <Layers className="text-orange-600" size={20} />
+                    ) : (
+                      <MapPin className="text-blue-600" size={20} />
+                    )}
+                    <span className={`text-xs font-bold px-3 py-1.5 rounded-full shadow-sm ${
+                      isInfiltration ? 'bg-orange-100 text-orange-700' : 'bg-blue-100 text-blue-700'
+                    }`}>
+                      {isInfiltration ? 'Infiltration' : 'Terrain'}
+                    </span>
+                    <span className="text-xs font-semibold px-3 py-1.5 rounded-full bg-indigo-100 text-indigo-700 flex items-center gap-1.5 shadow-sm">
+                      <User size={13} />
+                      {search.users ? `${search.users.first_name} ${search.users.last_name}` : 'Technicien'}
+                    </span>
+                  </div>
+                  <span className="text-xs font-medium text-gray-500 bg-gray-50 px-3 py-1.5 rounded-full">
+                    {new Date(search.shared_at || search.created_at).toLocaleDateString('fr-FR')}
+                  </span>
+                </div>
+
+                {/* Client info */}
+                {(search.nom || search.prenom) && (
+                  <div className={`mb-3 p-3 rounded-xl border shadow-sm ${
+                    isInfiltration ? 'bg-orange-50 border-orange-200' : 'bg-blue-50 border-blue-200'
+                  }`}>
+                    <p className={`text-sm font-bold flex items-center gap-2 ${
+                      isInfiltration ? 'text-orange-900' : 'text-blue-900'
+                    }`}>
+                      <User size={16} className={isInfiltration ? 'text-orange-600' : 'text-blue-600'} />
+                      {search.prenom} {search.nom}
+                    </p>
+                  </div>
+                )}
+
+                {/* Adresse */}
+                <div className="mb-3 bg-gray-50 p-3 rounded-xl border border-gray-200">
+                  <h3 className="font-bold text-gray-900 text-sm flex items-start gap-2">
+                    <MapPin size={16} className={`mt-0.5 flex-shrink-0 ${
+                      isInfiltration ? 'text-orange-600' : 'text-blue-600'
+                    }`} strokeWidth={2.5} />
+                    <span>{search.location || 'Sans adresse'}</span>
+                  </h3>
+                </div>
+
+                {/* Description */}
+                {search.description && (
+                  <div className="mb-3 italic">
+                    <p className="text-sm text-gray-700 line-clamp-2">{search.description}</p>
+                  </div>
+                )}
+
+                {/* Observations */}
+                {search.observations && cleanObservations(search.observations) && (
+                  <div className="mb-4 p-3 bg-amber-50 border-2 border-amber-200 rounded-xl shadow-sm">
+                    <p className="text-xs font-bold text-amber-800 mb-1.5 flex items-center gap-1.5">
+                      <span className="text-base">📝</span>
+                      Observations
+                    </p>
+                    <p className="text-sm text-gray-700 line-clamp-2 leading-relaxed">{cleanObservations(search.observations)}</p>
+                  </div>
+                )}
+
+                {/* Boutons d'action */}
+                <div className="flex gap-2 mb-4">
+                  <button
+                    onClick={() => handleViewDetails(search)}
+                    className={`flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl transition-all text-sm font-bold shadow-md hover:shadow-lg transform hover:scale-105 ${
+                      isInfiltration 
+                        ? 'bg-orange-600 hover:bg-orange-700 text-white' 
+                        : 'bg-blue-600 hover:bg-blue-700 text-white'
+                    }`}
+                  >
+                    <Eye size={16} strokeWidth={2.5} />
+                    Détails
+                  </button>
+                  <button
+                    onClick={() => !isConverted && handleEdit(search)}
+                    disabled={isConverted}
+                    className={`flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl transition-all text-sm font-bold shadow-md hover:shadow-lg ${
+                      isConverted
+                        ? 'bg-gray-400 text-gray-200 cursor-not-allowed'
+                        : 'bg-gray-700 hover:bg-gray-800 text-white transform hover:scale-105'
+                    }`}
+                    title={isConverted ? 'Projet déjà créé - modification désactivée' : 'Modifier la recherche'}
+                  >
+                    <Edit2 size={16} strokeWidth={2.5} />
+                    Modifier
+                  </button>
+                  <button
+                    onClick={async () => {
+                      console.log('🔵 Bouton PDF cliqué pour search:', search.id);
+                      try {
+                        console.log('📄 Génération PDF en cours...');
+                        const response = await fetch(`${API}/searches/${search.id}/pdf`, {
+                          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+                        });
+                        console.log('📊 Réponse PDF:', response.status, response.ok);
+                        if (!response.ok) {
+                          const errorText = await response.text();
+                          console.error('❌ Erreur serveur:', errorText);
+                          throw new Error(`Erreur génération PDF: ${response.status} - ${errorText}`);
+                        }
+                        const blob = await response.blob();
+                        console.log('✅ Blob reçu:', blob.size, 'bytes');
+                        const url = window.URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = `recherche_${search.location || search.id}.pdf`;
+                        document.body.appendChild(a);
+                        a.click();
+                        console.log('📥 Téléchargement déclenché');
+                        window.URL.revokeObjectURL(url);
+                        document.body.removeChild(a);
+                      } catch (error) {
+                        console.error('❌ ERREUR PDF:', error);
+                        alert(`❌ Erreur lors de la génération du PDF: ${error.message}`);
+                      }
+                    }}
+                    className="flex items-center justify-center gap-2 bg-green-600 text-white px-3 py-2.5 rounded-xl hover:bg-green-700 transition-all text-sm font-bold shadow-md hover:shadow-lg transform hover:scale-105"
+                    title="Télécharger en PDF"
+                  >
+                    <Download size={16} strokeWidth={2.5} />
+                    PDF
+                  </button>
+                </div>
+
+                {/* Bouton Transformer en Projet / Projet Créé */}
+                <button
+                  onClick={() => {
+                    if (isConverted) return; // Désactiver si déjà converti
+                    
+                    console.log('Bouton Transformer en Projet clique pour recherche:', search.id);
+                    
+                    // Stocker la recherche à convertir et pré-remplir le formulaire
+                    setSearchToConvert(search);
+                    
+                    // Nettoyer les observations du formatage Markdown
+                    const cleanedDescription = search.description || '';
+                    const cleanedObservations = cleanObservations(search.observations || '');
+                    
+                    setNewProject({
+                      name: search.location || 'Projet sans nom',
+                      client_id: '',
+                      status: 'RECHERCHE',
+                      priority: 'NORMAL',
+                      category: search.search_type === 'TERRAIN' ? 'Recherche terrain' : 'Infiltration',
+                      estimated_value: '',
+                      start_date: '',
+                      notes: cleanedObservations || cleanedDescription || ''
+                    });
+                    
+                    console.log('Redirection vers projets...');
+                    // Redirection vers les projets (le useEffect ouvrira le modal automatiquement)
+                    setOpenFolder('projects');
+                  }}
+                  disabled={isConverted}
+                  className={`w-full py-3 px-4 rounded-xl font-bold text-sm transition-all flex items-center justify-center gap-2.5 shadow-lg hover:shadow-xl ${
+                    isConverted
+                      ? 'bg-green-600 text-white cursor-not-allowed'
+                      : isInfiltration 
+                        ? 'bg-blue-600 hover:bg-blue-700 text-white cursor-pointer transform hover:scale-105' 
+                        : 'bg-blue-600 hover:bg-blue-700 text-white cursor-pointer transform hover:scale-105'
+                  }`}
+                >
+                  {isConverted ? (
+                    <>
+                      <CheckCircle size={18} strokeWidth={2.5} />
+                      Projet Créé
+                    </>
+                  ) : (
+                    <>
+                      <FolderOpen size={18} strokeWidth={2.5} />
+                      Transformer en Projet
+                    </>
+                  )}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+
+        {searches.length === 0 && (
+          <div className="text-center py-12 bg-white rounded-lg border-2 border-dashed border-gray-300">
+            <Search className="h-16 w-16 text-gray-300 mx-auto mb-4" />
+            <p className="text-gray-500">Aucune recherche partagée</p>
+          </div>
+        )}
+
+        {/* Modal Détails */}
+        {isDetailsModalOpen && selectedSearch && (
+          <SearchDetailsModal 
+            search={selectedSearch} 
+            onClose={handleCloseDetailsModal}
+          />
+        )}
+        
+        {/* Modal Édition - Utilise le même formulaire que la création */}
+        {isEditModalOpen && selectedSearch && (
+          <div className="fixed inset-0 bg-black bg-opacity-90 flex items-center justify-center z-50">
+            <div className="bg-white rounded-xl shadow-2xl w-[98vw] h-[98vh] overflow-y-auto p-6">
+              {/* Header */}
+              <div className="flex items-center justify-between mb-6 pb-4 border-b-2 border-gray-200">
+                <div>
+                  <h2 className="text-2xl font-semibold text-gray-900">Modifier la Recherche</h2>
+                  <p className="text-sm text-gray-600 mt-1">Éditez les informations de la recherche</p>
+                </div>
+                <button
+                  onClick={handleCloseEditModal}
+                  className="p-2 hover:bg-gray-100 rounded-full transition-colors"
+                >
+                  <X className="h-6 w-6 text-gray-600" />
+                </button>
+              </div>
+              
+              {/* Formulaire de recherche réutilisé */}
+              <SearchForm 
+                searchType={selectedSearch.search_type || 'TERRAIN'}
+                initialSearch={selectedSearch}
+                onSearchLoaded={() => console.log('✅ Recherche chargée pour édition')}
+              />
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // Vue Paramètres Entreprise
+  if (openFolder === 'settings') {
+    return <CompanySettings onBack={() => setOpenFolder(null)} />;
+  }
+
+  // Vue Bureau (par défaut)
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-blue-50 to-gray-100 p-6">
+      {/* Header */}
+      <div className="mb-8">
+        <h1 className="text-3xl font-bold text-gray-900 flex items-center gap-3">
+          <Briefcase className="h-8 w-8" />
+          Mon Entreprise
+        </h1>
+        <p className="text-gray-600 mt-1">Bureau de gestion</p>
+      </div>
+
+      {/* Barre de recherche */}
+      <div className="mb-6 max-w-2xl mx-auto">
+        <div className="relative">
+          <Search className="absolute left-4 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
+          <input
+            type="text"
+            placeholder="Rechercher un projet ou une recherche..."
+            value={searchTerm}
+            onChange={(e) => setSearchTerm(e.target.value)}
+            className="w-full pl-12 pr-4 py-3 border-2 border-gray-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent shadow-sm"
+          />
+          {searchTerm && (
+            <button
+              onClick={() => setSearchTerm('')}
+              className="absolute right-4 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Bureau - Dossiers */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {/* Dossier Projets */}
+        <button
+          onClick={() => setOpenFolder('projects')}
+          className="bg-white rounded-xl border-2 border-gray-200 hover:border-blue-500 p-8 transition-all hover:shadow-xl group text-left"
+        >
+          <div className="flex flex-col items-center text-center">
+            <div className="relative mb-4">
+              <FolderOpen className="h-24 w-24 text-blue-500 group-hover:scale-110 transition-transform" />
+              <div className="absolute -top-1 -right-1 bg-blue-500 text-white text-xs font-bold rounded-full w-8 h-8 flex items-center justify-center">
+                {projects.length}
+              </div>
+            </div>
+            <h3 className="text-xl font-bold text-gray-900 mb-2">📁 Projets</h3>
+            <p className="text-sm text-gray-600">Tous vos projets en cours</p>
+          </div>
+        </button>
+
+        {/* Dossier Recherches Techniciens */}
+        <button
+          onClick={() => setOpenFolder('searches')}
+          className="bg-white rounded-xl border-2 border-gray-200 hover:border-orange-500 p-8 transition-all hover:shadow-xl group text-left"
+        >
+          <div className="flex flex-col items-center text-center">
+            <div className="relative mb-4">
+              <Search className="h-24 w-24 text-orange-500 group-hover:scale-110 transition-transform" />
+              <div className="absolute -top-1 -right-1 bg-orange-500 text-white text-xs font-bold rounded-full w-8 h-8 flex items-center justify-center">
+                {searches.length}
+              </div>
+            </div>
+            <h3 className="text-xl font-bold text-gray-900 mb-2">🔍 Recherches</h3>
+            <p className="text-sm text-gray-600">Recherches partagées</p>
+          </div>
+        </button>
+
+        {/* Bouton Nouveau Projet */}
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            setShowCreateModal(true);
+          }}
+          className="bg-gradient-to-br from-black to-gray-800 rounded-xl border-2 border-gray-800 p-8 transition-all hover:shadow-xl group text-left"
+        >
+          <div className="flex flex-col items-center text-center">
+            <Plus className="h-24 w-24 text-white mb-4 group-hover:scale-110 transition-transform" />
+            <h3 className="text-xl font-bold text-white mb-2">Nouveau Projet</h3>
+            <p className="text-sm text-gray-300">Créer manuellement</p>
+          </div>
+        </button>
+
+        {/* Bouton Paramètres Entreprise */}
+        <button
+          onClick={() => setOpenFolder('settings')}
+          className="bg-gradient-to-br from-indigo-600 to-purple-600 rounded-xl border-2 border-indigo-500 p-8 transition-all hover:shadow-xl group text-left"
+        >
+          <div className="flex flex-col items-center text-center">
+            <Settings className="h-24 w-24 text-white mb-4 group-hover:scale-110 group-hover:rotate-90 transition-all" />
+            <h3 className="text-xl font-bold text-white mb-2">⚙️ Paramètres</h3>
+            <p className="text-sm text-indigo-100">Informations légales</p>
+          </div>
+        </button>
+      </div>
+
+      {/* Modal Création Devis */}
+      {showQuoteModal && selectedProjectForQuote && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg max-w-4xl w-full max-h-[90vh] overflow-y-auto">
+            <div className="p-6 border-b border-gray-200 flex items-center justify-between sticky top-0 bg-white">
+              <h2 className="text-2xl font-bold text-gray-900 flex items-center gap-2">
+                <FileText className="h-6 w-6" />
+                Créer un Devis - {selectedProjectForQuote.name}
+              </h2>
+              <button
+                onClick={() => setShowQuoteModal(false)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <X className="h-6 w-6" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-6">
+              {/* Informations du projet */}
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                <h3 className="font-semibold text-blue-900 mb-2 flex items-center gap-2">
+                  <Briefcase className="h-5 w-5" />
+                  Projet
+                </h3>
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div>
+                    <span className="text-blue-700">N°:</span>
+                    <span className="ml-2 font-medium">{selectedProjectForQuote.project_number}</span>
+                  </div>
+                  <div>
+                    <span className="text-blue-700">Client:</span>
+                    <span className="ml-2 font-medium">
+                      {clients.find(c => c.id === selectedProjectForQuote.client_id)?.nom || '-'}
+                    </span>
+                  </div>
+                  <div className="col-span-2">
+                    <span className="text-blue-700">Montant estimé:</span>
+                    <span className="ml-2 font-medium">
+                      {selectedProjectForQuote.estimated_value ? `${parseFloat(selectedProjectForQuote.estimated_value).toLocaleString('fr-FR')}€` : 'Non défini'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Formulaire devis */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Titre du devis */}
+                <div className="col-span-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Titre du devis <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Ex: Devis plomberie cuisine"
+                    value={newQuote.title}
+                    onChange={(e) => setNewQuote({...newQuote, title: e.target.value})}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
+                </div>
+
+                {/* Montant HT */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Montant HT <span className="text-red-500">*</span>
+                  </label>
+                  <div className="relative">
+                    <input
+                      type="number"
+                      placeholder="0.00"
+                      value={newQuote.amount_ht}
+                      onChange={(e) => setNewQuote({...newQuote, amount_ht: e.target.value})}
+                      className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    />
+                    <span className="absolute right-3 top-2.5 text-gray-500">€</span>
+                  </div>
+                </div>
+
+                {/* TVA */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    TVA (%)
+                  </label>
+                  <select 
+                    value={newQuote.tva}
+                    onChange={(e) => setNewQuote({...newQuote, tva: e.target.value})}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  >
+                    <option value="20">20%</option>
+                    <option value="10">10%</option>
+                    <option value="5.5">5.5%</option>
+                    <option value="0">0%</option>
+                  </select>
+                </div>
+
+                {/* Date de validité */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Valable jusqu'au
+                  </label>
+                  <input
+                    type="date"
+                    value={newQuote.valid_until}
+                    onChange={(e) => setNewQuote({...newQuote, valid_until: e.target.value})}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
+                </div>
+
+                {/* Délai de réalisation */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Délai de réalisation
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Ex: 2 semaines"
+                    value={newQuote.deadline}
+                    onChange={(e) => setNewQuote({...newQuote, deadline: e.target.value})}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
+                </div>
+
+                {/* Description */}
+                <div className="col-span-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Description des travaux
+                  </label>
+                  <textarea
+                    rows="4"
+                    placeholder="Décrivez les travaux à réaliser..."
+                    value={newQuote.description}
+                    onChange={(e) => setNewQuote({...newQuote, description: e.target.value})}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
+                </div>
+
+                {/* Conditions */}
+                <div className="col-span-2">
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Conditions particulières
+                  </label>
+                  <textarea
+                    rows="3"
+                    placeholder="Conditions de paiement, garanties, etc."
+                    value={newQuote.conditions}
+                    onChange={(e) => setNewQuote({...newQuote, conditions: e.target.value})}
+                    className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Boutons d'action */}
+            <div className="p-6 border-t border-gray-200 flex gap-3 justify-end sticky bottom-0 bg-white">
+              <button
+                onClick={() => setShowQuoteModal(false)}
+                className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition"
+              >
+                Annuler
+              </button>
+              <button
+                onClick={handleCreateQuoteSubmit}
+                className="flex items-center gap-2 px-6 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition"
+              >
+                <Check className="h-5 w-5" />
+                Créer le devis
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// Page d'acceptation d'invitation
+const AcceptInvitationPage = () => {
+  const navigate = useNavigate();
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [invitation, setInvitation] = useState(null);
+  const [formData, setFormData] = useState({
+    email: '',
+    confirmEmail: '',
+    password: '',
+    confirmPassword: '',
+    firstName: '',
+    lastName: ''
+  });
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get('token');
+    
+    if (!token) {
+      setError('Token d\'invitation manquant');
+      setLoading(false);
+      return;
+    }
+
+    // Vérifier le token et récupérer les infos d'invitation
+    axios.get(`${API}/invitations/${token}/validate`)
+      .then(response => {
+        setInvitation(response.data);
+        setFormData(prev => ({ ...prev, email: response.data.email }));
+        setLoading(false);
+      })
+      .catch(err => {
+        setError(err.response?.data?.detail || 'Invitation invalide ou expirée');
+        setLoading(false);
+      });
+  }, []);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    
+    if (formData.email.toLowerCase() !== formData.confirmEmail.toLowerCase()) {
+      setError('Les adresses email ne correspondent pas');
+      return;
+    }
+
+    if (formData.password !== formData.confirmPassword) {
+      setError('Les mots de passe ne correspondent pas');
+      return;
+    }
+
+    if (formData.password.length < 6) {
+      setError('Le mot de passe doit contenir au moins 6 caractères');
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const token = params.get('token');
+
+      // Créer le compte et accepter l'invitation avec le nouvel endpoint
+      const response = await axios.post(`${API}/invitations/${invitation.id}/accept-and-register`, {
+        email: formData.email,
+        password: formData.password,
+        first_name: formData.firstName,
+        last_name: formData.lastName
+      });
+
+      // Connexion automatique
+      if (response.data.token) {
+        localStorage.setItem('token', response.data.token);
+        localStorage.setItem('user', JSON.stringify(response.data.user));
+        window.location.href = '/bureau';
+      } else {
+        setError('Compte créé mais impossible de se connecter automatiquement');
+      }
+    } catch (err) {
+      setError(err.response?.data?.detail || 'Erreur lors de l\'acceptation de l\'invitation');
+      setLoading(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 flex items-center justify-center">
+        <div className="text-center">
+          <Loader2 className="h-12 w-12 animate-spin text-blue-600 mx-auto mb-4" />
+          <p className="text-gray-600">Vérification de l'invitation...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (error && !invitation) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 flex items-center justify-center p-6">
+        <Card className="max-w-md w-full">
+          <CardContent className="p-8 text-center">
+            <XCircle className="h-16 w-16 text-red-500 mx-auto mb-4" />
+            <h2 className="text-2xl font-bold text-gray-900 mb-2">Invitation invalide</h2>
+            <p className="text-gray-600 mb-6">{error}</p>
+            <Button onClick={() => window.location.href = '/'} className="w-full">
+              Retour à l'accueil
+            </Button>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100 flex items-center justify-center p-6">
+      <Card className="max-w-md w-full">
+        <CardHeader className="text-center pb-6">
+          <div className="w-16 h-16 bg-gradient-to-br from-blue-600 to-blue-700 rounded-xl flex items-center justify-center mx-auto mb-4">
+            <Mail className="h-8 w-8 text-white" />
+          </div>
+          <CardTitle className="text-2xl font-bold">Accepter l'invitation</CardTitle>
+          <CardDescription className="mt-2">
+            Vous êtes invité à rejoindre <strong>{invitation?.company_name}</strong> en tant que <strong>{invitation?.role}</strong>
+          </CardDescription>
+          {invitation?.invited_by && (
+            <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+              <p className="text-sm text-gray-700">
+                <span className="font-medium">Invité par :</span> {invitation.invited_by}
+              </p>
+            </div>
+          )}
+        </CardHeader>
+
+        <CardContent>
+          {error && (
+            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+              {error}
+            </div>
+          )}
+
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Email
+              </label>
+              <Input
+                type="email"
+                value={formData.email}
+                disabled
+                className="bg-gray-50"
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Confirmer votre email
+              </label>
+              <Input
+                type="email"
+                value={formData.confirmEmail}
+                onChange={(e) => setFormData({ ...formData, confirmEmail: e.target.value })}
+                placeholder="Confirmez votre adresse email"
+                required
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Prénom
+                </label>
+                <Input
+                  type="text"
+                  value={formData.firstName}
+                  onChange={(e) => setFormData({ ...formData, firstName: e.target.value })}
+                  placeholder="Votre prénom"
+                  required
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  Nom
+                </label>
+                <Input
+                  type="text"
+                  value={formData.lastName}
+                  onChange={(e) => setFormData({ ...formData, lastName: e.target.value })}
+                  placeholder="Votre nom"
+                  required
+                />
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Mot de passe
+              </label>
+              <Input
+                type="password"
+                value={formData.password}
+                onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+                placeholder="Minimum 6 caractères"
+                required
+                minLength={6}
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Confirmer le mot de passe
+              </label>
+              <Input
+                type="password"
+                value={formData.confirmPassword}
+                onChange={(e) => setFormData({ ...formData, confirmPassword: e.target.value })}
+                placeholder="Confirmez votre mot de passe"
+                required
+                minLength={6}
+              />
+            </div>
+
+            <Button
+              type="submit"
+              disabled={loading}
+              className="w-full bg-gradient-to-r from-blue-600 to-blue-700 hover:from-blue-700 hover:to-blue-800"
+            >
+              {loading ? (
+                <span className="flex items-center justify-center">
+                  <Loader2 className="h-4 w-4 animate-spin mr-2" />
+                  Création du compte...
+                </span>
+              ) : (
+                <span className="flex items-center justify-center">
+                  <CheckCircle className="h-4 w-4 mr-2" />
+                  Accepter et créer mon compte
+                </span>
+              )}
+            </Button>
+          </form>
+        </CardContent>
+      </Card>
+    </div>
+  );
+};
+
 // Main App Component
 function App() {
   const [user, setUser] = useState(null);
   const [token, setToken] = useState(null);
   const [loading, setLoading] = useState(true);
   const founderEmail = FOUNDER_EMAIL;
-  const isFounder = (user?.is_founder === true) || ((user?.email || '').toLowerCase() === founderEmail);
+  const isFounder = (user?.is_fondateur === true) || ((user?.email || '').toLowerCase() === founderEmail);
   const isAdmin = isFounder || (user?.role === 'ADMIN');
 
   useEffect(() => {
@@ -13116,6 +24220,7 @@ function App() {
           
           <Routes>
             <Route path="/" element={<LandingPage />} />
+            <Route path="/accept-invitation" element={<AcceptInvitationPage />} />
             <Route 
               path="/role-selection" 
               element={user ? <RoleSelection /> : <Navigate to="/" />} 
@@ -13126,12 +24231,12 @@ function App() {
             />
             <Route 
               path="/bureau/*" 
-              element={user ? (isAdmin ? <BureauLayout /> : <Navigate to="/role-selection" />) : <Navigate to="/" />} 
+              element={user ? ((isAdmin || user?.role === 'BUREAU') ? <BureauLayout /> : <Navigate to="/role-selection" />) : <Navigate to="/" />} 
             />
-            {/* Redirection par défaut vers /bureau/devis */}
+            {/* Redirection par défaut vers /bureau/projets */}
             <Route 
               path="/bureau" 
-              element={<Navigate to="/bureau/devis" replace />} 
+              element={<Navigate to="/bureau/projets" replace />} 
             />
             <Route 
               path="/statistiques" 
@@ -13143,6 +24248,9 @@ function App() {
               element={user ? (isFounder ? <SupremeAdminLayout /> : <Navigate to="/role-selection" />) : <Navigate to="/" />} 
             />
           </Routes>
+
+          {/* AI Orb - Orbe Blanche et Noire toujours active */}
+          {user && <AIOrb />}
         </div>
       </BrowserRouter>
     </AuthContext.Provider>

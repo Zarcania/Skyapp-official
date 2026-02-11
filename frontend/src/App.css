@@ -4,11 +4,21 @@
 
 /* Apple-style CSS for SkyApp */
 
+/* Supprimer les scrollbars indésirables sur les côtés */
+html, body {
+  overflow-x: hidden;
+  margin: 0;
+  padding: 0;
+  width: 100%;
+}
+
 /* Clean and minimal styling */
 .App {
   min-height: 100vh;
   position: relative;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+  overflow-x: hidden;
+  width: 100%;
 }
 
 /* Smooth transitions */
@@ -464,18 +474,22 @@ h1, h2, h3, h4, h5, h6 {
   letter-spacing: -0.005em;
 }
 
-/* Logo Neon Effect */
-.logo-neon-effect {
-  filter: drop-shadow(0 0 8px rgba(0, 0, 0, 0.6)) 
-          drop-shadow(0 0 16px rgba(0, 0, 0, 0.4))
-          drop-shadow(0 0 24px rgba(0, 0, 0, 0.2));
+/* Logo Neon Effect - Stable version without overflow */
+.logo-neon-stable {
+  filter: drop-shadow(0 0 6px rgba(0, 0, 0, 0.5)) 
+          drop-shadow(0 0 12px rgba(0, 0, 0, 0.3));
   transition: filter 0.3s ease;
+  /* Empêche le débordement */
+  will-change: filter;
+  transform: translateZ(0);
+  /* Contient l'effet dans les limites de l'élément */
+  contain: layout style paint;
 }
 
-.logo-neon-effect:hover {
-  filter: drop-shadow(0 0 12px rgba(0, 0, 0, 0.8)) 
-          drop-shadow(0 0 24px rgba(0, 0, 0, 0.6))
-          drop-shadow(0 0 36px rgba(0, 0, 0, 0.4));
+.logo-neon-stable:hover {
+  filter: drop-shadow(0 0 8px rgba(0, 0, 0, 0.6)) 
+          drop-shadow(0 0 16px rgba(0, 0, 0, 0.4));
+  /* Pas de transformation qui affecte le layout */
 }
 
 /* Counter Animations */

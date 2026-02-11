@@ -1,22 +1,65 @@
+# Configuration Render pour Skyapp Backend
+# Documentation: https://render.com/docs/yaml-spec
+
 services:
   - type: web
     name: skyapp-backend
     env: python
-    plan: starter
+    plan: starter  # Upgrade to 'standard' for better performance in production
+    region: frankfurt  # Choisir la région la plus proche de vos utilisateurs
     buildCommand: pip install -r backend/requirements.txt
-    startCommand: uvicorn server_supabase:app --host 0.0.0.0 --port $PORT
+    startCommand: uvicorn server_supabase:app --host 0.0.0.0 --port $PORT --workers 2
     rootDir: backend
-    autoDeploy: true
+    autoDeploy: true  # Déploie automatiquement à chaque push sur la branche
+    
+    # Health check pour monitorer l'état du service
+    healthCheckPath: /api/health
+    
     envVars:
+      # ⚠️ IMPORTANT: Configurer ces variables dans le dashboard Render
+      # Ne JAMAIS commiter les valeurs réelles dans ce fichier
+      
+      # Supabase Configuration (REQUIRED)
       - key: SUPABASE_URL
-        sync: false
+        sync: false  # À configurer manuellement dans Render Dashboard
       - key: SUPABASE_SERVICE_KEY
-        sync: false
+        sync: false  # ⚠️ SECRET - Ne jamais exposer
       - key: SUPABASE_ANON_KEY
         sync: false
+      
+      # Application Configuration
       - key: FOUNDER_EMAIL
-        value: "skyapp@gmail.com"
+        value: "contact@skyapp.fr"  # ⚠️ Remplacer par votre vrai email fondateur
+      
+      # Security Configuration (CRITICAL)
       - key: ALLOW_DEV_LOGIN
-        value: "0"
+        value: "0"  # ⚠️ DOIT être 0 en production
+      
+      - key: ENVIRONMENT
+        value: "production"
+      
+      # CORS Configuration (CRITICAL)
+      # ⚠️ Remplacer par vos vrais domaines avant le déploiement
+      # Format: https://domain1.com,https://domain2.com (sans espaces)
       - key: ALLOWED_ORIGINS
-        value: "https://app.example.com,https://skyapp.vercel.app"
+        value: "https://skyapp.vercel.app"  # ⚠️ À MODIFIER avec votre URL Vercel finale
+      
+      # Optional: OpenAI Configuration (pour les fonctionnalités IA)
+      - key: OPENAI_API_KEY
+        sync: false  # À configurer si vous utilisez l'IA
+      
+      # Optional: IOPOLE Configuration (pour la facturation électronique)
+      - key: IOPOLE_API_KEY
+        sync: false
+      - key: IOPOLE_API_ENDPOINT
+        sync: false
+      
+      # Optional: SMTP Configuration (pour l'envoi d'emails)
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
