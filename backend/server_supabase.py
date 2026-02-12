@@ -8120,10 +8120,23 @@ app.mount("/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
 
 # CORS (production: utiliser la variable d'env ALLOWED_ORIGINS, ex: https://app.tondomaine.com,https://preview.vercel.app)
 allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "*")
+# Toujours inclure les domaines de production
+_production_origins = [
+    "https://skyapp.fr",
+    "https://www.skyapp.fr",
+    "https://skyapp-frontend.onrender.com",
+]
 if allowed_origins_env.strip() in ("", "*"):
     _allow_origins = ["*"]
 else:
     _allow_origins = [o.strip() for o in allowed_origins_env.split(",") if o.strip()]
+# Fusionner avec les origines de production
+for origin in _production_origins:
+    if origin not in _allow_origins:
+        _allow_origins.append(origin)
+# Si "*" est dans la liste avec d'autres origines, garder seulement les origines explicites
+if "*" in _allow_origins and len(_allow_origins) > 1:
+    _allow_origins = [o for o in _allow_origins if o != "*"]
 
 app.add_middleware(
     CORSMiddleware,
