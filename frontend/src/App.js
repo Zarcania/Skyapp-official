@@ -5682,8 +5682,8 @@ const SearchForm = forwardRef(({ onDraftEvent, searchType = 'terrain', initialSe
         await autoSaveDraft({ forceSave: true });
         console.log('✅ Photos sauvegardées');
         
-        // Mettre à jour la recherche en préservant son statut original (SHARED, ACTIVE, etc.)
-        const statusToUse = originalSearchStatus || 'ACTIVE';
+        // Mettre à jour la recherche : passer en ACTIVE si c'était un brouillon, sinon préserver le statut (SHARED, PROCESSED, etc.)
+        const statusToUse = (originalSearchStatus && originalSearchStatus !== 'DRAFT') ? originalSearchStatus : 'ACTIVE';
         console.log('📊 Statut utilisé pour la mise à jour:', statusToUse);
         response = await axios.patch(`${API}/searches/${ensuredDraftId}`, { ...payload, status: statusToUse, search_type: searchType?.toUpperCase() }, {
           headers: { Authorization: `Bearer ${authToken}` }
