@@ -107,6 +107,45 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# ============================================================
+# CORS - Configuré IMMÉDIATEMENT après la création de l'app
+# ============================================================
+_dev_origins = [
+    "http://localhost:3000",
+    "http://localhost:3002",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3002",
+]
+_production_origins = [
+    "https://skyapp.fr",
+    "https://www.skyapp.fr",
+    "https://skyapp-frontend.onrender.com",
+]
+
+# Toujours inclure les origines de production + dev
+_allow_origins = _dev_origins + _production_origins
+
+# Si ALLOWED_ORIGINS est défini, ajouter aussi ces origines
+allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "")
+if allowed_origins_env.strip() == "*":
+    _allow_origins = ["*"]
+elif allowed_origins_env.strip():
+    _extra = [o.strip() for o in allowed_origins_env.split(",") if o.strip()]
+    # Fusionner avec les origines de base (sans doublons)
+    for o in _extra:
+        if o not in _allow_origins:
+            _allow_origins.append(o)
+
+logging.info(f"🌐 CORS origins autorisées: {_allow_origins}")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=True,
+    allow_origins=_allow_origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Exception handler pour les erreurs de validation Pydantic
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -8332,40 +8371,7 @@ uploads_dir = ROOT_DIR / "uploads"
 uploads_dir.mkdir(exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
 
-# CORS (production: utiliser la variable d'env ALLOWED_ORIGINS, ex: https://app.tondomaine.com,https://preview.vercel.app)
-allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "")
-# Origines de développement local
-_dev_origins = [
-    "http://localhost:3000",
-    "http://localhost:3002",
-    "http://127.0.0.1:3000",
-    "http://127.0.0.1:3002",
-]
-# Origines de production
-_production_origins = [
-    "https://skyapp.fr",
-    "https://www.skyapp.fr",
-    "https://skyapp-frontend.onrender.com",
-]
-
-# Construire la liste des origines autorisées
-if allowed_origins_env.strip() == "*":
-    # En mode développement avec *, autoriser tout
-    _allow_origins = ["*"]
-elif allowed_origins_env.strip():
-    # Utiliser les origines spécifiées dans la variable d'environnement
-    _allow_origins = [o.strip() for o in allowed_origins_env.split(",") if o.strip()]
-else:
-    # Par défaut, autoriser dev + production
-    _allow_origins = _dev_origins + _production_origins
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_credentials=True,
-    allow_origins=_allow_origins,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# CORS déjà configuré en haut du fichier (juste après app = FastAPI(...))
 
 # Point d'entrée principal
 if __name__ == "__main__":
