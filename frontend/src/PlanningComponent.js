@@ -171,15 +171,19 @@ const PlanningManagement = () => {
   });
   
   const [scheduleData, setScheduleData] = useState({
-    intervention_category: 'rdv', // 'rdv', 'worksite', ou 'urgence'
+    intervention_category: 'worksite', // 'rdv', 'worksite', ou 'urgence'
+    worksite_mode: 'existing', // 'existing' ou 'new'
     worksite_id: '',
+    new_worksite_title: '',
+    new_worksite_address: '',
     client_name: '',
     client_address: '',
     client_contact: '',
     team_leader_id: '',
     collaborator_id: '',
     additional_collaborators: [], // Pour ajouter plusieurs collaborateurs
-    date: selectedDate,
+    start_date: selectedDate,
+    end_date: selectedDate,
     time: '08:00', // Heure de début
     shift: 'day', // day, night, morning, afternoon
     hours: '8',
@@ -479,33 +483,57 @@ const PlanningManagement = () => {
     return weekDates;
   };
 
-  // Grouper les missions multi-jours d'un même chantier pour affichage horizontal étendu
-  const getMultiDaySchedulesForMember = (memberSchedules, weekStart) => {
+  // Dédupliquer les schedules par chantier pour afficher une seule carte par mission
+  const deduplicateTeamSchedules = (teamSchedules, weekStart) => {
+    const weekStartDate = new Date(weekStart);
+    weekStartDate.setHours(0, 0, 0, 0);
+
+    // Grouper par worksite_id + dates de début/fin pour dédupliquer
+    const scheduleMap = new Map();
+
+    teamSchedules.forEach(schedule => {
+      // Support des deux formats: period_start/period_end OU start_date/end_date
+      const startDate = schedule.period_start || schedule.start_date || schedule.date;
+      const endDate = schedule.period_end || schedule.end_date || startDate;
+      const key = `${schedule.worksite_id || 'no-worksite'}_${startDate}_${endDate}`;
+      
+      if (!scheduleMap.has(key)) {
+        scheduleMap.set(key, schedule);
+      }
+    });
+
+    // Convertir en array et calculer les positions grille
     const grouped = [];
-    const processed = new Set();
+    scheduleMap.forEach(schedule => {
+      // Utiliser period_start/period_end en priorité, sinon start_date/end_date
+      const startDateStr = schedule.period_start || schedule.start_date || schedule.date;
+      const endDateStr = schedule.period_end || schedule.end_date || startDateStr;
 
-    memberSchedules.forEach(schedule => {
-      if (processed.has(schedule.id)) return;
+      if (startDateStr && endDateStr) {
+        const startDate = new Date(startDateStr);
+        const endDate = new Date(endDateStr);
+        startDate.setHours(0, 0, 0, 0);
+        endDate.setHours(0, 0, 0, 0);
 
-      // Avec le nouveau système, chaque schedule a start_date et end_date
-      const startDate = new Date(schedule.start_date || schedule.date);
-      startDate.setHours(0, 0, 0, 0);
-      const endDate = new Date(schedule.end_date || schedule.date);
-      endDate.setHours(0, 0, 0, 0);
+        const daysDiff = Math.round((startDate.getTime() - weekStartDate.getTime()) / (1000 * 60 * 60 * 24));
+        const daysSpan = Math.round((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)) + 1;
+        const columnStart = Math.max(1, daysDiff + 1);
+        const columnEnd = Math.min(8, daysDiff + 1 + daysSpan);
+        const columnSpan = columnEnd - columnStart;
 
-      // Calculer la position et la durée du bloc
-      const daysDiff = Math.round((startDate.getTime() - weekStart.getTime()) / (1000 * 60 * 60 * 24));
-      const daysSpan = Math.round((endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60 * 24)) + 1;
-
-      grouped.push({
-        ...schedule,
-        columnStart: Math.max(1, Math.min(daysDiff + 1, 7)),
-        columnSpan: Math.max(1, Math.min(daysSpan, 8 - (daysDiff + 1))),
-        isMultiDay: daysSpan > 1,
-        dayCount: daysSpan
-      });
-
-      processed.add(schedule.id);
+        if (columnSpan > 0) {
+          grouped.push({
+            ...schedule,
+            _start: startDate,
+            _end: endDate,
+            _ids: [schedule.id],
+            columnStart,
+            columnSpan,
+            isMultiDay: daysSpan > 1,
+            dayCount: daysSpan
+          });
+        }
+      }
     });
 
     return grouped;
@@ -856,10 +884,21 @@ const PlanningManagement = () => {
 
   const addSchedule = async () => {
     try {
+      const token = localStorage.getItem('token');
+      const headers = { 'Authorization': `Bearer ${token}` };
+
       // Validation selon la catégorie
       if (scheduleData.intervention_category === 'worksite') {
-        if (!scheduleData.worksite_id || !scheduleData.team_leader_id || !scheduleData.collaborator_id) {
-          alert('Chantier, chef d\'équipe et collaborateur sont obligatoires');
+        if (scheduleData.worksite_mode === 'existing' && !scheduleData.worksite_id) {
+          alert('Veuillez sélectionner un chantier');
+          return;
+        }
+        if (scheduleData.worksite_mode === 'new' && !scheduleData.new_worksite_title) {
+          alert('Veuillez entrer un nom pour le nouveau chantier');
+          return;
+        }
+        if (!scheduleData.team_leader_id || !scheduleData.collaborator_id) {
+          alert('Chef d\'équipe et collaborateur sont obligatoires');
           return;
         }
       } else if (scheduleData.intervention_category === 'urgence') {
@@ -868,81 +907,128 @@ const PlanningManagement = () => {
           return;
         }
       } else if (scheduleData.intervention_category === 'rdv') {
-        // Pour les RDV, seul le nom du client est obligatoire
         if (!scheduleData.client_name) {
           alert('Nom du client est obligatoire');
           return;
         }
       }
 
+      // Si nouveau chantier, le créer d'abord
+      let worksiteId = scheduleData.worksite_id;
+      if (scheduleData.intervention_category === 'worksite' && scheduleData.worksite_mode === 'new') {
+        const worksiteRes = await axios.post(`${API}/worksites`, {
+          title: scheduleData.new_worksite_title,
+          address: scheduleData.new_worksite_address || '',
+          status: 'PLANNED',
+          source: 'MANUAL',
+          start_date: scheduleData.start_date,
+          end_date: scheduleData.end_date
+        }, { headers });
+        worksiteId = worksiteRes.data?.id;
+        if (!worksiteId) {
+          alert('Erreur lors de la création du chantier');
+          return;
+        }
+      }
+
       const selectedShift = SHIFT_OPTIONS.find(s => s.value === scheduleData.shift);
-      
-      const scheduleToSend = {
-        ...scheduleData,
-        hours: selectedShift.hours
-      };
 
-      const token = localStorage.getItem('token');
-      const response = await axios.post(`${API}/schedules`, scheduleToSend, {
-        headers: { 'Authorization': `Bearer ${token}` }
-      });
+      // Tous les membres à planifier : chef d'équipe + collaborateur principal + supplémentaires
+      const allCollaborators = [
+        scheduleData.team_leader_id, 
+        scheduleData.collaborator_id, 
+        ...scheduleData.additional_collaborators
+      ].filter(Boolean); // Enlever les valeurs vides
 
-      setSchedules(prev => [...prev, response.data]);
-      setScheduleData({
-        intervention_category: 'rdv',
+      // Créer UN schedule par collaborateur avec period_start/period_end
+      const promises = [];
+      for (const collabId of allCollaborators) {
+        const schedulePayload = {
+          worksite_id: worksiteId || undefined,
+          team_leader_id: scheduleData.team_leader_id || undefined,
+          collaborator_id: collabId,
+          intervention_category: scheduleData.intervention_category || 'worksite',
+          period_start: scheduleData.start_date,
+          period_end: scheduleData.end_date,
+          time: scheduleData.time,
+          shift: scheduleData.shift,
+          hours: selectedShift?.hours || 8,
+          description: scheduleData.description || '',
+          client_name: scheduleData.client_name || undefined,
+          client_address: scheduleData.client_address || undefined
+        };
+        console.log('📤 Payload envoyé au backend:', schedulePayload);
+        promises.push(axios.post(`${API}/schedules`, schedulePayload, { headers }));
+      }
+
+      const results = await Promise.allSettled(promises);
+      const succeeded = results.filter(r => r.status === 'fulfilled');
+      const duplicates = results.filter(r => r.status === 'rejected' && r.reason?.response?.status === 409);
+      const errors = results.filter(r => r.status === 'rejected' && r.reason?.response?.status !== 409);
+
+      // Log des erreurs pour debugging
+      if (errors.length > 0) {
+        console.error('❌ Erreurs lors de la création des schedules:');
+        errors.forEach((err, idx) => {
+          console.error(`  Erreur ${idx + 1}:`, err.reason?.response?.data);
+          console.error(`  Status:`, err.reason?.response?.status);
+        });
+      }
+
+      if (succeeded.length === 0 && duplicates.length > 0) {
+        alert('⚠️ Tous les plannings existent déjà pour ces dates !');
+        return;
+      }
+
+      if (succeeded.length === 0 && errors.length > 0) {
+        alert('❌ Erreur lors de la création des plannings. Voir la console pour les détails.');
+        return;
+      }
+
+      // Ajouter les schedules créés à l'état
+      const newSchedules = succeeded.map(r => r.value.data);
+      setSchedules(prev => [...prev, ...newSchedules]);
+
+      // Recharger les worksites si nouveau chantier créé
+      if (scheduleData.worksite_mode === 'new') {
+        try {
+          const worksitesRes = await axios.get(`${API}/worksites`, { headers });
+          // Will be handled by parent reload
+        } catch(e) {}
+      }
+
+      const resetState = {
+        intervention_category: 'worksite',
+        worksite_mode: 'existing',
         worksite_id: '',
+        new_worksite_title: '',
+        new_worksite_address: '',
         client_name: '',
         client_address: '',
         client_contact: '',
         team_leader_id: '',
         collaborator_id: '',
         additional_collaborators: [],
-        date: selectedDate,
+        start_date: selectedDate,
+        end_date: selectedDate,
         time: '08:00',
         shift: 'day',
         hours: '8',
         description: ''
-      });
+      };
+      setScheduleData(resetState);
       setShowScheduleForm(false);
-      alert('Planning ajouté avec succès !');
-    } catch (error) {
-      console.error('Erreur ajout planning:', error);
-      
-      // Vérifier si c'est une erreur de doublon
-      if (error.response?.status === 409) {
-        alert('⚠️ Ce planning existe déjà !\n\nUn planning identique est déjà programmé pour ce collaborateur à cette date et heure.\n\nVeuillez vérifier le calendrier ou modifier l\'heure du rendez-vous.');
-        return;
+
+      if (duplicates.length > 0) {
+        alert(`✅ ${succeeded.length} planning(s) créé(s) ! (${duplicates.length} doublons ignorés)`);
+      } else {
+        alert(`✅ ${succeeded.length} planning(s) créé(s) avec succès !`);
       }
       
-      // Fallback en cas d'erreur avec l'API
-      const selectedShift = SHIFT_OPTIONS.find(s => s.value === scheduleData.shift);
-      
-      const newSchedule = {
-        id: Date.now().toString(),
-        ...scheduleData,
-        hours: selectedShift.hours,
-        status: 'scheduled',
-        created_at: new Date().toISOString()
-      };
-
-      setSchedules(prev => [...prev, newSchedule]);
-      setScheduleData({
-        intervention_category: 'rdv',
-        worksite_id: '',
-        client_name: '',
-        client_address: '',
-        client_contact: '',
-        team_leader_id: '',
-        collaborator_id: '',
-        date: selectedDate,
-        time: '08:00',
-        shift: 'day',
-        hours: '8',
-        description: '',
-        intervention_type: 'rdv'
-      });
-      setShowScheduleForm(false);
-      alert('Planning ajouté avec succès !');
+      await loadPlanningData();
+    } catch (error) {
+      console.error('Erreur ajout planning:', error);
+      alert('❌ Erreur lors de la création du planning: ' + (error.response?.data?.detail || error.message));
     }
   };
 
@@ -1477,13 +1563,12 @@ const PlanningManagement = () => {
                             return (
                               <div 
                                 key={leaderId}
-                                className={`grid grid-cols-[150px_repeat(7,1fr)] sm:grid-cols-[200px_repeat(7,1fr)] border-b-2 hover:bg-gray-50 transition-colors relative ${
+                                className={`flex border-b-2 ${
                                   teamData.hasSchedules ? 'border-gray-400 bg-gray-50' : 'border-gray-200'
                                 }`}
-                                style={{ minHeight: `${100 + (teamData.members.length * 45)}px` }}
                               >
                                 {/* Colonne Équipe (Chef + Membres) */}
-                                <div className={`p-2 sm:p-3 border-r-2 border-gray-200 ${colorScheme.bg} ${teamData.hasSchedules ? 'border-l-4 border-l-green-500' : ''}`}>
+                                <div className={`w-[150px] sm:w-[200px] flex-shrink-0 p-2 sm:p-3 border-r-2 border-gray-200 ${colorScheme.bg} ${teamData.hasSchedules ? 'border-l-4 border-l-green-500' : ''}`}>
                                   {/* Badge équipe active */}
                                   {teamData.hasSchedules && (
                                     <div className="mb-2 flex items-center justify-center">
@@ -1584,179 +1669,154 @@ const PlanningManagement = () => {
                                   {/* Compteur de membres */}
                                   <div className="mt-3 pt-2 border-t border-gray-300">
                                     <div className="text-xs font-semibold text-gray-600 text-center">
-                                      {teamData.members.length} membre{teamData.members.length > 1 ? 's' : ''}
+                                      {teamData.members.length + 1} membre{teamData.members.length + 1 > 1 ? 's' : ''}
                                     </div>
                                   </div>
                                 </div>
 
-                                {/* Zone de contenu avec missions en blocs horizontaux étendus */}
-                                <div className={`absolute top-0 left-[150px] sm:left-[200px] right-0 bottom-0 overflow-visible planning-team-container-${leaderId}`}>
-                                  {/* Grille de fond pour chaque jour */}
-                                  <div className="grid grid-cols-7 gap-px bg-gray-200 absolute inset-0">
-                                    {getWeekDates(currentDate).map((date, dayIndex) => (
-                                      <div 
-                                        key={dayIndex}
-                                        className={`${colorScheme.bg} ${colorScheme.bg === 'bg-yellow-100' ? 'bg-opacity-30' : ''}`}
-                                      />
-                                    ))}
-                                  </div>
+                                {/* Zone des missions - sous-lignes par schedule fusionné */}
+                                <div className="flex-1 flex flex-col min-h-[100px]">
+                                  {(() => {
+                                    const weekStart = getWeekDates(currentDate)[0];
+                                    weekStart.setHours(0, 0, 0, 0);
+                                    
+                                    const teamSchedules = schedules.filter(s => {
+                                      const scheduleStart = new Date(s.start_date || s.date);
+                                      scheduleStart.setHours(0, 0, 0, 0);
+                                      const scheduleEnd = new Date(s.end_date || s.date || s.start_date);
+                                      scheduleEnd.setHours(23, 59, 59, 999);
+                                      const weekEnd = new Date(weekStart);
+                                      weekEnd.setDate(weekEnd.getDate() + 6);
+                                      weekEnd.setHours(23, 59, 59, 999);
+                                      return s.team_leader_id === leaderId && scheduleStart <= weekEnd && scheduleEnd >= weekStart;
+                                    });
 
-                                  {/* Container pour les missions avec positionnement absolu */}
-                                  <div className={`absolute inset-0 overflow-visible planning-team-container-${leaderId}`}>
-                                    {(() => {
-                                      const weekStart = getWeekDates(currentDate)[0];
-                                      weekStart.setHours(0, 0, 0, 0);
-                                      
-                                      // Récupérer tous les schedules de l'équipe
-                                      // IMPORTANT: Filtrer par team_leader_id ET par semaine affichée
-                                      const teamSchedules = schedules.filter(s => {
-                                        // Utiliser start_date et end_date pour vérifier si le schedule chevauche la semaine
-                                        const scheduleStart = new Date(s.start_date || s.date);
-                                        scheduleStart.setHours(0, 0, 0, 0);
-                                        const scheduleEnd = new Date(s.end_date || s.date || s.start_date);
-                                        scheduleEnd.setHours(23, 59, 59, 999);
-                                        
-                                        const weekEnd = new Date(weekStart);
-                                        weekEnd.setDate(weekEnd.getDate() + 6);
-                                        weekEnd.setHours(23, 59, 59, 999);
-                                        
-                                        // Filtrer par chef d'équipe ET vérifier si la période du schedule chevauche la semaine
-                                        const isCorrectTeam = s.team_leader_id === leaderId;
-                                        // Un schedule est visible si sa période chevauche la semaine affichée
-                                        const isInWeek = scheduleStart <= weekEnd && scheduleEnd >= weekStart;
-                                        
-                                        return isCorrectTeam && isInWeek;
+                                    // Dédupliquer les schedules par chantier pour éviter les doublons
+                                    const uniqueSchedules = deduplicateTeamSchedules(teamSchedules, weekStart);
+
+                                    if (uniqueSchedules.length === 0) {
+                                      return (
+                                        <div className="grid grid-cols-7 gap-px flex-1 bg-gray-100">
+                                          {getWeekDates(currentDate).map((_, i) => (
+                                            <div key={i} className="bg-white min-h-[80px] flex items-center justify-center">
+                                              <div className="w-8 h-1 bg-gray-200 rounded"></div>
+                                            </div>
+                                          ))}
+                                        </div>
+                                      );
+                                    }
+
+                                    // Afficher UN SEUL bloc par mission d'équipe
+                                    return uniqueSchedules.map((schedule, rowIdx) => {
+                                      // Compter le nombre de membres affectés à cette mission
+                                      const missionSchedules = teamSchedules.filter(s => {
+                                        const sStart = s.period_start || s.start_date || s.date;
+                                        const sEnd = s.period_end || s.end_date || sStart;
+                                        const schedStart = schedule.period_start || schedule.start_date || schedule.date;
+                                        const schedEnd = schedule.period_end || schedule.end_date || schedStart;
+                                        return s.worksite_id === schedule.worksite_id && sStart === schedStart && sEnd === schedEnd;
                                       });
-                                      
-                                      console.log(`📋 Équipe ${leaderId} (${teamData.leader?.prenom} ${teamData.leader?.nom}): ${teamSchedules.length} schedule(s)`);
-                                      teamSchedules.forEach(s => {
-                                        console.log(`  - Schedule ${s.id}: team_leader=${s.team_leader_id}, collaborator=${s.collaborator_id}`);
-                                      });
+                                      const memberCount = missionSchedules.length;
 
-                                      // Grouper par membre
-                                      const schedulesByMember = {};
-                                      teamSchedules.forEach(schedule => {
-                                        const memberId = schedule.collaborator_id || 'unassigned';
-                                        if (!schedulesByMember[memberId]) {
-                                          schedulesByMember[memberId] = [];
-                                        }
-                                        schedulesByMember[memberId].push(schedule);
-                                      });
+                                      const startTime = schedule.time || '08:00';
+                                      const hours = parseInt(schedule.hours) || 8;
+                                      const [startHour, startMin] = startTime.split(':').map(Number);
+                                      const endHour = startHour + hours;
+                                      const formatSimpleTime = (h, m) => `${h}h${m > 0 ? m.toString().padStart(2, '0') : ''}`;
+                                      const startTimeSimple = formatSimpleTime(startHour, startMin);
+                                      const endTimeSimple = formatSimpleTime(endHour, startMin);
+                                      const totalHours = schedule.isMultiDay ? (schedule.dayCount * hours) : hours;
 
-                                      let rowIndex = 0;
-                                      const allScheduleElements = Object.entries(schedulesByMember).map(([memberId, memberSchedules]) => {
-                                        const member = teamData.members.find(m => m.user_id === memberId);
-                                        const groupedSchedules = getMultiDaySchedulesForMember(memberSchedules, weekStart);
-
-                                        return groupedSchedules.map((schedule, idx) => {
-                                          const startTime = schedule.time || '08:00';
-                                          const hours = parseInt(schedule.hours) || 8;
-                                          const [startHour, startMin] = startTime.split(':').map(Number);
-                                          const endHour = startHour + hours;
-                                          // Format simplifié : 8h au lieu de 08:00
-                                          const formatSimpleTime = (h, m) => `${h}h${m > 0 ? m.toString().padStart(2, '0') : ''}`;
-                                          const startTimeSimple = formatSimpleTime(startHour, startMin);
-                                          const endTimeSimple = formatSimpleTime(endHour, startMin);
-                                          const totalHours = schedule.isMultiDay ? (schedule.dayCount * hours) : hours;
-                                          const topPosition = 10 + (rowIndex * 95);
-                                          rowIndex++;
-
-                                          return (
+                                      return (
+                                        <div 
+                                          key={`${schedule.id}-${rowIdx}`}
+                                          className="grid grid-cols-7 gap-px bg-gray-100 border-b border-gray-100"
+                                          style={{ minHeight: '90px' }}
+                                        >
+                                          {/* Cellule de mission positionnée via gridColumn */}
+                                          <div 
+                                            style={{ gridColumn: `${schedule.columnStart} / span ${schedule.columnSpan}` }}
+                                            className="p-1"
+                                          >
                                             <div
-                                              key={`${memberId}-${idx}`}
                                               onClick={() => {
                                                 setSelectedSchedule({
                                                   ...schedule,
-                                                  member: member,
                                                   teamLeader: teamData.leader,
                                                   startTime: startTimeSimple,
                                                   endTime: endTimeSimple,
-                                                  hours: totalHours
+                                                  hours: totalHours,
+                                                  memberCount: memberCount
                                                 });
                                                 setShowScheduleDetail(true);
                                               }}
-                                              className={`absolute rounded-xl shadow-lg hover:shadow-2xl transition-all duration-300 cursor-pointer group overflow-hidden ${
-                                                schedule.isMultiDay ? 'border-2 border-blue-500 ring-2 ring-blue-200' : 'border-2 border-gray-200'
-                                              }`}
-                                              style={{
-                                                left: `calc(${(schedule.columnStart - 1) * (100 / 7)}% + 6px)`,
-                                                right: `calc(${(7 - schedule.columnStart - schedule.columnSpan + 1) * (100 / 7)}% + 6px)`,
-                                                top: `0px`,
-                                                bottom: `0px`,
-                                                zIndex: 10 + idx,
-                                                background: 'linear-gradient(135deg, #ffffff 0%, #f9fafb 50%, #f3f4f6 100%)'
-                                              }}
+                                              className={`h-full rounded-xl shadow-md hover:shadow-xl transition-all cursor-pointer group overflow-hidden border-2 ${
+                                                schedule.isMultiDay ? 'border-blue-400 ring-1 ring-blue-200' : 'border-gray-200'
+                                              } bg-white`}
                                             >
                                               {/* Barre latérale colorée */}
-                                              <div className={`absolute left-0 top-0 bottom-0 w-1.5 ${colorScheme.text.replace('text-', 'bg-')} opacity-80 group-hover:opacity-100 transition-opacity`}></div>
+                                              <div className={`absolute left-0 top-0 bottom-0 w-1.5 ${colorScheme.text.replace('text-', 'bg-')} opacity-80`}></div>
                                               
-                                              <div className="p-2.5 h-full flex flex-col justify-between pl-3">
-                                                {/* Nom du client - Design amélioré */}
-                                                <div className="mb-1.5">
-                                                  <div className={`text-sm font-bold ${colorScheme.text} truncate leading-snug tracking-tight`}>
-                                                    {schedule.worksites?.clients?.name || 
+                                              <div className="p-2.5 h-full flex flex-col justify-between pl-3 relative">
+                                                {/* Nom du chantier */}
+                                                <div className="mb-1">
+                                                  <div className={`text-sm font-bold ${colorScheme.text} truncate leading-snug`}>
+                                                    {schedule.worksites?.title || 
+                                                     (schedule.worksites?.clients?.name) ||
                                                      (schedule.worksites?.clients?.prenom && schedule.worksites?.clients?.nom 
                                                        ? `${schedule.worksites.clients.prenom} ${schedule.worksites.clients.nom}` 
-                                                       : (member ? `${member.first_name} ${member.last_name}` : 'Mission'))}
+                                                       : 'Mission équipe')}
                                                   </div>
                                                 </div>
 
                                                 <div className="flex-1 space-y-1.5">
-                                                  {/* Horaire avec design moderne */}
-                                                  <div className="flex items-center">
+                                                  {/* Horaire et nombre de membres */}
+                                                  <div className="flex items-center gap-2 flex-wrap">
                                                     <div className="bg-gradient-to-r from-blue-500 to-indigo-600 px-2.5 py-1 rounded-lg shadow-sm">
                                                       <span className="text-xs font-bold text-white whitespace-nowrap">🕐 {startTimeSimple}-{endTimeSimple}</span>
                                                     </div>
+                                                    {schedule.isMultiDay && (
+                                                      <span className="text-xs font-semibold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full">
+                                                        {schedule.dayCount}j
+                                                      </span>
+                                                    )}
+                                                    {memberCount > 1 && (
+                                                      <span className="text-xs font-semibold text-green-700 bg-green-50 px-2 py-0.5 rounded-full">
+                                                        👥 {memberCount} membres
+                                                      </span>
+                                                    )}
                                                   </div>
 
-                                                  {/* Chantier - Design élégant */}
+                                                  {/* Chantier */}
                                                   {schedule.worksites?.title && (
-                                                    <div className="bg-gradient-to-br from-white to-gray-50 rounded-lg px-2 py-1.5 border-2 border-gray-100 shadow-sm">
+                                                    <div className="bg-gray-50 rounded-lg px-2 py-1.5 border border-gray-100">
                                                       <div className="text-xs font-bold text-gray-800 line-clamp-2 leading-tight">
                                                         🏗️ {schedule.worksites.title}
                                                       </div>
                                                       {(schedule.worksites.address || schedule.worksites?.clients?.address) && (
-                                                        <div className="text-xs text-gray-600 line-clamp-2 mt-1 leading-tight">
+                                                        <div className="text-xs text-gray-600 line-clamp-1 mt-0.5">
                                                           📍 {schedule.worksites.address || schedule.worksites?.clients?.address}
                                                         </div>
                                                       )}
                                                     </div>
                                                   )}
 
-                                                  {/* Description */}
+                                                  {/* Description fallback */}
                                                   {!schedule.worksites?.title && schedule.description && (
-                                                    <div className="bg-gradient-to-br from-white to-gray-50 rounded-lg px-2 py-1.5 border-2 border-gray-100 shadow-sm">
-                                                      <div className="text-xs font-medium text-gray-700 line-clamp-2 leading-tight">
+                                                    <div className="bg-gray-50 rounded-lg px-2 py-1.5 border border-gray-100">
+                                                      <div className="text-xs font-medium text-gray-700 line-clamp-2">
                                                         {schedule.description.replace(/^Planning pour\s*/i, '')}
                                                       </div>
                                                     </div>
                                                   )}
                                                 </div>
                                               </div>
-
-                                              {/* Effet hover animé */}
-                                              <div className="absolute inset-0 bg-gradient-to-r from-blue-500/0 via-indigo-500/0 to-purple-500/0 group-hover:from-blue-500/5 group-hover:via-indigo-500/5 group-hover:to-purple-500/5 rounded-xl transition-all duration-300 pointer-events-none"></div>
                                             </div>
-                                          );
-                                        });
-                                      });
-                                      
-                                      // Calculer la hauteur nécessaire
-                                      const totalSchedules = allScheduleElements.flat().length;
-                                      const requiredHeight = Math.max(100, totalSchedules * 95 + 15);
-                                      
-                                      return (
-                                        <>
-                                          <style>{`
-                                            .planning-team-container-${leaderId} {
-                                              min-height: ${requiredHeight}px !important;
-                                            }
-                                          `}</style>
-                                          {allScheduleElements}
-                                        </>
+                                          </div>
+                                        </div>
                                       );
-                                    })()}
-                                  </div>
+                                    });
+                                  })()}
                                 </div>
                               </div>
                             );
@@ -1765,7 +1825,7 @@ const PlanningManagement = () => {
                           {/* Techniciens sans équipe */}
                           {unassignedTechs.length > 0 && (
                             <>
-                              <div className="col-span-8 bg-gray-100 p-2 border-y-2 border-gray-400">
+                              <div className="bg-gray-100 p-2 border-y-2 border-gray-400">
                                 <div className="text-sm font-bold text-gray-600 text-center">
                                   👤 COLLABORATEURS SANS ÉQUIPE
                                 </div>
@@ -2839,7 +2899,7 @@ const PlanningManagement = () => {
                       : 'text-white hover:bg-white/20'
                   }`}
                 >
-                  🏗️ Chantier Existant
+                  🏗️ Chantier
                 </button>
                 <button
                   onClick={() => setScheduleData(prev => ({
@@ -2878,31 +2938,85 @@ const PlanningManagement = () => {
               </div>
             </CardHeader>
             <CardContent className="space-y-6 p-6">
-              {/* Chantier existant ou Informations Client */}
+              {/* Chantier ou Informations Client */}
               {scheduleData.intervention_category === 'worksite' ? (
-                <div>
-                  <label className="block text-sm font-semibold text-gray-700 mb-3">
-                    🏗️ Sélectionnez le Chantier
-                  </label>
-                  <select
-                    value={scheduleData.worksite_id}
-                    onChange={(e) => setScheduleData(prev => ({...prev, worksite_id: e.target.value}))}
-                    className="w-full rounded-xl border-2 border-gray-200 focus:border-purple-500 focus:ring-4 focus:ring-purple-500/20 p-3 bg-white shadow-sm transition-all"
-                  >
-                    <option value="">Choisissez un chantier *</option>
-                    {worksites.map(worksite => {
-                      // Vérifier si ce chantier a déjà des plannings
-                      const hasSchedules = schedules.some(s => s.worksite_id === worksite.id);
-                      return (
-                        <option key={worksite.id} value={worksite.id}>
-                          {hasSchedules ? '📅 ' : ''}{worksite.title}
-                        </option>
-                      );
-                    })}
-                  </select>
-                  <p className="text-xs text-gray-500 mt-2">
-                    📅 = Chantier déjà planifié
-                  </p>
+                <div className="space-y-4">
+                  {/* Sous-onglets Chantier Existant / Nouveau Chantier */}
+                  <div className="flex gap-2 bg-gray-100 rounded-xl p-1">
+                    <button
+                      onClick={() => setScheduleData(prev => ({...prev, worksite_mode: 'existing', new_worksite_title: '', new_worksite_address: ''}))}
+                      className={`flex-1 py-2 px-3 rounded-lg text-sm font-semibold transition-all ${
+                        scheduleData.worksite_mode === 'existing'
+                          ? 'bg-white text-purple-700 shadow-sm'
+                          : 'text-gray-500 hover:text-gray-700'
+                      }`}
+                    >
+                      📁 Chantier existant
+                    </button>
+                    <button
+                      onClick={() => setScheduleData(prev => ({...prev, worksite_mode: 'new', worksite_id: ''}))}
+                      className={`flex-1 py-2 px-3 rounded-lg text-sm font-semibold transition-all ${
+                        scheduleData.worksite_mode === 'new'
+                          ? 'bg-white text-purple-700 shadow-sm'
+                          : 'text-gray-500 hover:text-gray-700'
+                      }`}
+                    >
+                      ➕ Nouveau chantier
+                    </button>
+                  </div>
+
+                  {scheduleData.worksite_mode === 'existing' ? (
+                    <div>
+                      <label className="block text-sm font-semibold text-gray-700 mb-3">
+                        🏗️ Sélectionnez le Chantier
+                      </label>
+                      <select
+                        value={scheduleData.worksite_id}
+                        onChange={(e) => setScheduleData(prev => ({...prev, worksite_id: e.target.value}))}
+                        className="w-full rounded-xl border-2 border-gray-200 focus:border-purple-500 focus:ring-4 focus:ring-purple-500/20 p-3 bg-white shadow-sm transition-all"
+                      >
+                        <option value="">Choisissez un chantier *</option>
+                        {worksites.map(worksite => {
+                          const hasSchedules = schedules.some(s => s.worksite_id === worksite.id);
+                          return (
+                            <option key={worksite.id} value={worksite.id}>
+                              {hasSchedules ? '📅 ' : ''}{worksite.title}
+                            </option>
+                          );
+                        })}
+                      </select>
+                      <p className="text-xs text-gray-500 mt-2">
+                        📅 = Chantier déjà planifié
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      <div>
+                        <label className="block text-sm font-semibold text-gray-700 mb-2">
+                          🏗️ Nom du chantier *
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="Ex: Rénovation cuisine M. Dupont"
+                          value={scheduleData.new_worksite_title}
+                          onChange={(e) => setScheduleData(prev => ({...prev, new_worksite_title: e.target.value}))}
+                          className="w-full rounded-xl border-2 border-gray-200 focus:border-purple-500 focus:ring-4 focus:ring-purple-500/20 p-3 bg-white shadow-sm transition-all"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-semibold text-gray-700 mb-2">
+                          📍 Adresse du chantier
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="Ex: 12 rue de la Paix, 75001 Paris"
+                          value={scheduleData.new_worksite_address}
+                          onChange={(e) => setScheduleData(prev => ({...prev, new_worksite_address: e.target.value}))}
+                          className="w-full rounded-xl border-2 border-gray-200 focus:border-purple-500 focus:ring-4 focus:ring-purple-500/20 p-3 bg-white shadow-sm transition-all"
+                        />
+                      </div>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <div className="space-y-4">
@@ -2957,7 +3071,7 @@ const PlanningManagement = () => {
                     onChange={async (e) => {
                       const teamLeaderId = e.target.value;
                       
-                      // Auto-sélectionner le premier collaborateur de cette équipe
+                      // Auto-sélectionner TOUS les collaborateurs de cette équipe
                       if (teamLeaderId) {
                         try {
                           const token = localStorage.getItem('token');
@@ -2967,40 +3081,54 @@ const PlanningManagement = () => {
                           const response = await axios.get(`${API}/team-leaders/${teamLeaderId}/collaborators`, { headers });
                           console.log('📦 [AutoSelect] Réponse API collaborateurs:', response.data);
                           
-                          // Extraire le premier collaborateur disponible
-                          let firstCollaboratorId = '';
+                          // Extraire TOUS les IDs des collaborateurs
+                          const allCollaboratorIds = [];
                           if (response.data && response.data.length > 0) {
-                            const firstItem = response.data[0];
-                            // La réponse peut avoir une structure imbriquée
-                            if (firstItem.collaborator && firstItem.collaborator.id) {
-                              firstCollaboratorId = firstItem.collaborator.id;
-                            } else if (firstItem.collaborator_id) {
-                              firstCollaboratorId = firstItem.collaborator_id;
-                            } else if (firstItem.id) {
-                              firstCollaboratorId = firstItem.id;
-                            }
+                            response.data.forEach(item => {
+                              let collabId = '';
+                              // La réponse peut avoir une structure imbriquée
+                              if (item.collaborator && item.collaborator.id) {
+                                collabId = item.collaborator.id;
+                              } else if (item.collaborator_id) {
+                                collabId = item.collaborator_id;
+                              } else if (item.id) {
+                                collabId = item.id;
+                              }
+                              if (collabId) {
+                                allCollaboratorIds.push(collabId);
+                              }
+                            });
                           }
                           
-                          console.log('🎯 [AutoSelect] Premier collaborateur sélectionné:', firstCollaboratorId);
+                          // Le premier devient le collaborateur principal
+                          const firstCollaboratorId = allCollaboratorIds[0] || '';
+                          // Les autres deviennent des collaborateurs supplémentaires
+                          const additionalCollaborators = allCollaboratorIds.slice(1);
+                          
+                          console.log('🎯 [AutoSelect] Premier collaborateur:', firstCollaboratorId);
+                          console.log('👥 [AutoSelect] Collaborateurs supplémentaires:', additionalCollaborators);
                           
                           setScheduleData(prev => ({
                             ...prev,
                             team_leader_id: teamLeaderId,
-                            collaborator_id: firstCollaboratorId
+                            collaborator_id: firstCollaboratorId,
+                            additional_collaborators: additionalCollaborators
                           }));
                         } catch (error) {
                           console.error('❌ [AutoSelect] Erreur chargement collaborateurs:', error);
                           setScheduleData(prev => ({
                             ...prev,
                             team_leader_id: teamLeaderId,
-                            collaborator_id: ''
+                            collaborator_id: '',
+                            additional_collaborators: []
                           }));
                         }
                       } else {
                         setScheduleData(prev => ({
                           ...prev,
                           team_leader_id: '',
-                          collaborator_id: ''
+                          collaborator_id: '',
+                          additional_collaborators: []
                         }));
                       }
                     }}
@@ -3094,16 +3222,35 @@ const PlanningManagement = () => {
               <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-semibold text-gray-700 mb-3">
-                    📅 Date de l'intervention
+                    📅 Date de début
                   </label>
                   <input
                     type="date"
-                    value={scheduleData.date}
-                    onChange={(e) => setScheduleData(prev => ({...prev, date: e.target.value}))}
+                    value={scheduleData.start_date}
+                    onChange={(e) => setScheduleData(prev => ({
+                      ...prev, 
+                      start_date: e.target.value,
+                      end_date: prev.end_date < e.target.value ? e.target.value : prev.end_date
+                    }))}
                     className="w-full rounded-xl border-2 border-gray-200 focus:border-purple-500 focus:ring-4 focus:ring-purple-500/20 p-3 bg-white shadow-sm transition-all"
                   />
                 </div>
                 
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-3">
+                    📅 Date de fin
+                  </label>
+                  <input
+                    type="date"
+                    value={scheduleData.end_date}
+                    min={scheduleData.start_date}
+                    onChange={(e) => setScheduleData(prev => ({...prev, end_date: e.target.value}))}
+                    className="w-full rounded-xl border-2 border-gray-200 focus:border-purple-500 focus:ring-4 focus:ring-purple-500/20 p-3 bg-white shadow-sm transition-all"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-semibold text-gray-700 mb-3">
                     ⏰ Heure de début
@@ -3202,8 +3349,13 @@ const PlanningManagement = () => {
                     <span className="text-purple-700">{getShiftLabel(scheduleData.shift)}</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    <span className="font-semibold text-purple-900 min-w-[110px]">📅 Date :</span>
-                    <span className="text-purple-700">{scheduleData.date ? new Date(scheduleData.date).toLocaleDateString('fr-FR') : 'Non définie'}</span>
+                    <span className="font-semibold text-purple-900 min-w-[110px]">📅 Période :</span>
+                    <span className="text-purple-700">
+                      {scheduleData.start_date ? new Date(scheduleData.start_date).toLocaleDateString('fr-FR') : 'Non définie'}
+                      {scheduleData.end_date && scheduleData.end_date !== scheduleData.start_date 
+                        ? ` → ${new Date(scheduleData.end_date).toLocaleDateString('fr-FR')}`
+                        : ''}
+                    </span>
                   </div>
                 </div>
               </div>

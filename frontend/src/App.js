@@ -10746,7 +10746,11 @@ const QuoteCreate = ({ defaultTab = 'quotes' }) => {
   };
 
   const calculateTotal = () => {
-    return formData.items.reduce((sum, item) => sum + (item.quantity * item.price), 0);
+    return formData.items.reduce((sum, item) => {
+      const qty = parseFloat(item.quantity) || 0;
+      const price = parseFloat(item.price) || 0;
+      return sum + (qty * price);
+    }, 0);
   };
 
   // Calculer le TTC d'un devis à partir de ses items
@@ -11811,10 +11815,11 @@ const QuoteCreate = ({ defaultTab = 'quotes' }) => {
                         <Input
                           type="number"
                           value={item.quantity}
-                          onChange={(e) => updateItem(index, 'quantity', parseInt(e.target.value) || 1)}
+                          onChange={(e) => updateItem(index, 'quantity', e.target.value === '' ? '' : parseFloat(e.target.value))}
                           placeholder="1"
                           className="rounded-xl border-gray-200 text-center"
-                          min="1"
+                          min="0"
+                          step="0.01"
                         />
                       </div>
                       
@@ -11822,7 +11827,7 @@ const QuoteCreate = ({ defaultTab = 'quotes' }) => {
                         <Input
                           type="number"
                           value={item.price}
-                          onChange={(e) => updateItem(index, 'price', parseFloat(e.target.value) || 0)}
+                          onChange={(e) => updateItem(index, 'price', e.target.value === '' ? '' : parseFloat(e.target.value))}
                           placeholder="0.00"
                           className="rounded-xl border-gray-200"
                           step="0.01"
@@ -11845,7 +11850,7 @@ const QuoteCreate = ({ defaultTab = 'quotes' }) => {
                       
                       <div className="col-span-2 text-center">
                         <span className="text-sm font-semibold text-gray-900">
-                          {(item.quantity * item.price).toFixed(2)}€
+                          {((parseFloat(item.quantity) || 0) * (parseFloat(item.price) || 0)).toFixed(2)}€
                         </span>
                       </div>
                       
@@ -16251,6 +16256,39 @@ const CatalogManagement = () => {
     setShowForm(true);
   };
 
+  const handleProductPhotoUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    if (file.size > 5 * 1024 * 1024) {
+      alert('La photo ne doit pas dépasser 5 Mo');
+      return;
+    }
+
+    try {
+      setUploadingPhoto(true);
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setProductPhoto({
+          name: file.name,
+          type: file.type,
+          data: reader.result,
+          preview: reader.result
+        });
+        setUploadingPhoto(false);
+      };
+      reader.readAsDataURL(file);
+    } catch (error) {
+      console.error('Erreur upload photo:', error);
+      alert('Erreur lors du téléchargement de la photo');
+      setUploadingPhoto(false);
+    }
+  };
+
+  const removeProductPhoto = () => {
+    setProductPhoto(null);
+  };
+
   const deleteProduct = async (productId) => {
     if (!window.confirm('Êtes-vous sûr de vouloir supprimer ce produit ?')) {
       return;
@@ -17910,10 +17948,10 @@ const BureauLayout = () => {
         <div className="max-w-7xl mx-auto px-4 sm:px-6">
           <div className="flex justify-between items-center h-16 sm:h-20 py-2 sm:py-3">
             <div className="flex items-center space-x-2 sm:space-x-4">
-              {/* Bouton retour - visible sur mobile */}
+              {/* Bouton retour */}
               <button
                 onClick={goBack}
-                className="md:hidden p-1.5 sm:p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200"
+                className="p-1.5 sm:p-2 text-gray-500 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-all duration-200"
               >
                 <ArrowLeft className="h-4 w-4 sm:h-5 sm:w-5" />
               </button>
@@ -20233,6 +20271,8 @@ const CompanySettings = ({ onBack }) => {
     siret: '',
     siren: '',
     rcs_rm: '',
+    phone: '',
+    email: '',
     logo_url: ''
   });
   const [logoFile, setLogoFile] = useState(null);
@@ -20270,6 +20310,8 @@ const CompanySettings = ({ onBack }) => {
           siret: response.data.siret || '',
           siren: response.data.siren || '',
           rcs_rm: response.data.rcs_rm || '',
+          phone: response.data.phone || '',
+          email: response.data.email || '',
           logo_url: response.data.logo_url || ''
         };
         setCompanyInfo(data);
@@ -20334,7 +20376,11 @@ const CompanySettings = ({ onBack }) => {
       await loadCompanyInfo();
     } catch (error) {
       console.error('Erreur sauvegarde:', error);
-      alert('❌ Erreur lors de la sauvegarde');
+      if (error.response?.status === 403) {
+        alert('🔒 Seul l\'administrateur peut modifier les paramètres de l\'entreprise.');
+      } else {
+        alert('❌ Erreur lors de la sauvegarde');
+      }
     } finally {
       setSaving(false);
     }
@@ -20458,6 +20504,35 @@ const CompanySettings = ({ onBack }) => {
                     <option key={form} value={form}>{form}</option>
                   ))}
                 </select>
+              </div>
+            </div>
+
+            {/* Téléphone et Email */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  Numéro de téléphone
+                </label>
+                <input
+                  type="tel"
+                  value={companyInfo.phone}
+                  onChange={(e) => setCompanyInfo(prev => ({ ...prev, phone: e.target.value }))}
+                  className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none"
+                  placeholder="Ex: 01 23 45 67 89"
+                />
+              </div>
+
+              <div>
+                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                  Adresse email
+                </label>
+                <input
+                  type="email"
+                  value={companyInfo.email}
+                  onChange={(e) => setCompanyInfo(prev => ({ ...prev, email: e.target.value }))}
+                  className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl focus:border-indigo-400 focus:outline-none"
+                  placeholder="Ex: contact@entreprise.fr"
+                />
               </div>
             </div>
 
@@ -23507,21 +23582,6 @@ const ProjectsHub = () => {
             </div>
             <h3 className="text-xl font-bold text-gray-900 mb-2">🔍 Recherches</h3>
             <p className="text-sm text-gray-600">Recherches partagées</p>
-          </div>
-        </button>
-
-        {/* Bouton Nouveau Projet */}
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            setShowCreateModal(true);
-          }}
-          className="bg-gradient-to-br from-black to-gray-800 rounded-xl border-2 border-gray-800 p-8 transition-all hover:shadow-xl group text-left"
-        >
-          <div className="flex flex-col items-center text-center">
-            <Plus className="h-24 w-24 text-white mb-4 group-hover:scale-110 transition-transform" />
-            <h3 className="text-xl font-bold text-white mb-2">Nouveau Projet</h3>
-            <p className="text-sm text-gray-300">Créer manuellement</p>
           </div>
         </button>
 

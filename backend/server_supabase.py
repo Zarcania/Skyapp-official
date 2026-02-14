@@ -1,6 +1,7 @@
 ﻿from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, UploadFile, File, Request, Form, Query
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
+from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -105,6 +106,18 @@ app = FastAPI(
     description="API pour l'application SkyApp avec Supabase",
     lifespan=lifespan
 )
+
+# Exception handler pour les erreurs de validation Pydantic
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    logging.error(f"❌ Erreur de validation Pydantic:")
+    logging.error(f"  URL: {request.url}")
+    logging.error(f"  Body: {await request.body()}")
+    logging.error(f"  Erreurs: {exc.errors()}")
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors(), "body": str(exc.body)}
+    )
 
 # Pas de middleware - cause des problèmes avec le body parsing
 
@@ -2209,6 +2222,9 @@ async def create_worksite(worksite_data: dict, user_data: dict = Depends(get_use
         if not company_id:
             raise HTTPException(status_code=400, detail="Vous devez appartenir à une entreprise")
         
+        # Log des données reçues pour debug
+        logging.info(f"🏗️ Création worksite - données reçues: {worksite_data}")
+        
         worksite_data["company_id"] = company_id
         
         # Valeurs par défaut
@@ -2217,9 +2233,37 @@ async def create_worksite(worksite_data: dict, user_data: dict = Depends(get_use
         if "source" not in worksite_data:
             worksite_data["source"] = "MANUAL"
         
-        response = supabase_service.table("worksites").insert(worksite_data).execute()
+        # Mapper budget -> amount
+        if "budget" in worksite_data and worksite_data["budget"]:
+            worksite_data["amount"] = float(worksite_data["budget"])
+        
+        # Liste des champs valides dans la table worksites
+        valid_fields = [
+            'title', 'client_id', 'client_name', 'quote_id', 'company_id',
+            'source', 'status', 'description', 'address', 'amount',
+            'start_date', 'end_date'
+        ]
+        
+        # Garder uniquement les champs valides et non vides
+        clean_data = {
+            k: v for k, v in worksite_data.items() 
+            if k in valid_fields and v not in [None, '', 'null']
+        }
+        
+        # Garder team_id pour utilisation ultérieure si besoin
+        team_id = worksite_data.get('team_id')
+        
+        logging.info(f"🏗️ Création worksite - données nettoyées: {clean_data}")
+        if team_id:
+            logging.info(f"👥 Équipe à affecter (pour usage futur): {team_id}")
+        
+        response = supabase_service.table("worksites").insert(clean_data).execute()
         return response.data[0] if response.data else {}
     except Exception as e:
+        logging.error(f"❌ Erreur création worksite: {str(e)}")
+        logging.error(f"❌ Type erreur: {type(e)}")
+        import traceback
+        logging.error(f"❌ Traceback: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"Erreur lors de la création du chantier: {str(e)}")
 
 async def calculate_worksite_progress(worksite_id: str, company_id: str) -> int:
@@ -4192,7 +4236,15 @@ async def generate_quote_pdf(
         # Log pour déboguer
         logging.info(f"📄 Génération PDF pour devis: {quote.get('quote_number', quote_id)}")
         logging.info(f"Client ID: {quote.get('client_id')}")
+        
+        # Vérifier et normaliser items
         items = quote.get('items', [])
+        if items is None:
+            items = []
+        if not isinstance(items, list):
+            logging.warning(f"⚠️ Items n'est pas une liste: {type(items)}")
+            items = []
+        
         logging.info(f"Items: {len(items)} articles")
         
         # Log des photos dans les items
@@ -4212,29 +4264,95 @@ async def generate_quote_pdf(
         buffer = io.BytesIO()
         
         def add_page_number(canvas_obj, doc_obj):
-            """Ajoute le numéro de page dans le pied de page"""
+            """Ajoute le pied de page avec infos société sur chaque page"""
             canvas_obj.saveState()
-            canvas_obj.setFont('Helvetica', 8)
-            canvas_obj.setFillColor(colors.Color(0.5, 0.5, 0.5))
-            page_num_text = f"Page {doc_obj.page}"
-            canvas_obj.drawCentredString(A4[0]/2, 1.5*cm, page_num_text)
+            page_width = A4[0]
+            left_margin = 1.5*cm
+            right_edge = page_width - 1.5*cm
+            usable_width = right_edge - left_margin
+            mid_x = page_width / 2
+            
+            # ==== ZONE SIGNATURES ====
+            # Labels signatures (fond gris clair)
+            canvas_obj.setFillColor(colors.HexColor('#f0f0f0'))
+            canvas_obj.rect(left_margin, 4.8*cm, usable_width/2 - 0.2*cm, 0.9*cm, fill=1, stroke=0)
+            canvas_obj.rect(mid_x + 0.1*cm, 4.8*cm, usable_width/2 - 0.2*cm, 0.9*cm, fill=1, stroke=0)
+            
+            # Texte signatures
+            canvas_obj.setFillColor(colors.black)
+            canvas_obj.setFont('Helvetica-Bold', 8)
+            canvas_obj.drawCentredString(left_margin + usable_width/4, 5.35*cm, "Bon pour accord")
+            canvas_obj.setFont('Helvetica', 6)
+            canvas_obj.drawCentredString(left_margin + usable_width/4, 5.05*cm, "(Date, Cachet, Signature)")
+            canvas_obj.setFont('Helvetica-Bold', 8)
+            canvas_obj.drawCentredString(mid_x + usable_width/4, 5.35*cm, "Signature chargé d'affaire")
+            
+            # ==== LIGNE DE SÉPARATION FOOTER ====
+            canvas_obj.setStrokeColor(colors.black)
+            canvas_obj.setLineWidth(1.2)
+            canvas_obj.line(left_margin, 2.2*cm, right_edge, 2.2*cm)
+            
+            # Nom de l'entreprise
+            canvas_obj.setFont('Helvetica-Bold', 7)
+            canvas_obj.setFillColor(colors.black)
+            company_name = company_info.get('company_name', '')
+            if company_name:
+                canvas_obj.drawCentredString(mid_x, 1.85*cm, company_name)
+            
+            # Infos contact (adresse, tél, email)
+            canvas_obj.setFont('Helvetica', 6)
+            canvas_obj.setFillColor(colors.HexColor('#444444'))
+            contact_parts = []
+            if company_info.get('address'):
+                contact_parts.append(company_info['address'])
+            if company_info.get('phone'):
+                contact_parts.append(f"Tél : {company_info['phone']}")
+            if company_info.get('email'):
+                contact_parts.append(company_info['email'])
+            if contact_parts:
+                canvas_obj.drawCentredString(mid_x, 1.5*cm, " - ".join(contact_parts))
+            
+            # Infos légales (forme juridique, SIRET, RCS, TVA)
+            legal_parts = []
+            if company_info.get('legal_form'):
+                legal_parts.append(company_info['legal_form'])
+            if company_info.get('siret'):
+                legal_parts.append(f"Siret : {company_info['siret']}")
+            if company_info.get('rcs_rm'):
+                legal_parts.append(company_info['rcs_rm'])
+            if company_info.get('tva_number'):
+                legal_parts.append(f"N° TVA : {company_info['tva_number']}")
+            if legal_parts:
+                canvas_obj.drawCentredString(mid_x, 1.15*cm, " - ".join(legal_parts))
+            
+            # Numéro de page + date d'émission
+            canvas_obj.setFont('Helvetica', 5.5)
+            canvas_obj.setFillColor(colors.HexColor('#888888'))
+            canvas_obj.drawCentredString(mid_x, 0.7*cm, 
+                f"Page {doc_obj.page} - Document émis le {datetime.now().strftime('%d/%m/%Y à %H:%M')}")
+            
             canvas_obj.restoreState()
         
-        doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=2*cm, bottomMargin=2*cm, 
-                               leftMargin=2*cm, rightMargin=2*cm)
+        doc = SimpleDocTemplate(buffer, pagesize=A4, topMargin=1*cm, bottomMargin=5.5*cm, 
+                               leftMargin=1.5*cm, rightMargin=1.5*cm)
         
         story = []
         styles = getSampleStyleSheet()
         
-        # Styles personnalisés
+        # Styles personnalisés noir et blanc
+        primary_color = colors.black
+        accent_color = colors.black
+        dark_gray = colors.HexColor('#333333')
+        medium_gray = colors.HexColor('#666666')
+        
         normal_style = ParagraphStyle('CustomNormal', parent=styles['Normal'],
-                                     fontSize=9, textColor=colors.black)
+                                     fontSize=9, textColor=dark_gray)
         
         bold_style = ParagraphStyle('Bold', parent=styles['Normal'],
                                    fontSize=9, textColor=colors.black, fontName='Helvetica-Bold')
         
         small_style = ParagraphStyle('Small', parent=styles['Normal'],
-                                    fontSize=8, textColor=colors.black)
+                                    fontSize=8, textColor=dark_gray)
         
         # ==== EN-TÊTE STYLE PROFESSIONNEL ====
         # Logo + Infos entreprise à gauche | Lieu/Date + Numéro devis à droite
@@ -4243,6 +4361,7 @@ async def generate_quote_pdf(
         left_content = []
         
         # Logo si disponible
+        logo_loaded = False
         if company_info.get('logo_url'):
             try:
                 logo_path = company_info['logo_url']
@@ -4253,8 +4372,30 @@ async def generate_quote_pdf(
                     # Chemin absolu local
                     logo_path = str(ROOT_DIR / logo_path.lstrip('/'))
                 
-                logo_img = ReportLabImage(logo_path, width=3.5*cm, height=3.5*cm, kind='proportional')
-                left_content.append(logo_img)
+                # Vérifier que le fichier existe avant de créer l'image
+                from pathlib import Path
+                if Path(logo_path).exists():
+                    logo_img = ReportLabImage(logo_path, width=3*cm, height=3*cm, kind='proportional')
+                    left_content.append(logo_img)
+                    left_content.append(Spacer(1, 0.2*cm))
+                    logo_loaded = True
+                    logging.info(f"✅ Logo chargé: {logo_path}")
+                else:
+                    # Si le logo spécifié n'existe pas, chercher le plus récent dans le dossier
+                    logos_dir = ROOT_DIR / 'uploads' / 'logos'
+                    if logos_dir.exists():
+                        logo_files = sorted(logos_dir.glob(f"company_logo_{company_id}_*.png"), 
+                                          key=lambda x: x.stat().st_mtime, reverse=True)
+                        if logo_files:
+                            logo_img = ReportLabImage(str(logo_files[0]), width=3*cm, height=3*cm, kind='proportional')
+                            left_content.append(logo_img)
+                            left_content.append(Spacer(1, 0.2*cm))
+                            logo_loaded = True
+                            logging.info(f"✅ Logo le plus récent chargé: {logo_files[0]}")
+                        else:
+                            logging.warning(f"⚠️ Aucun logo trouvé pour l'entreprise {company_id}")
+                    else:
+                        logging.warning(f"⚠️ Logo introuvable: {logo_path}")
             except Exception as e:
                 logging.error(f"Erreur chargement logo: {e}")
                 pass
@@ -4262,9 +4403,9 @@ async def generate_quote_pdf(
         # Infos entreprise sous le logo
         company_lines = []
         if company_info.get('company_name'):
-            company_lines.append(f"<b>{company_info['company_name']}</b>")
+            company_lines.append(f"<b><font size=12>{company_info['company_name']}</font></b>")
         if company_info.get('legal_form'):
-            company_lines.append(company_info['legal_form'])
+            company_lines.append(f"<font color='#666666'>{company_info['legal_form']}</font>")
         if company_info.get('address'):
             company_lines.append(company_info['address'])
         if company_info.get('postal_code') or company_info.get('city'):
@@ -4272,7 +4413,9 @@ async def generate_quote_pdf(
             city = company_info.get('city', '')
             company_lines.append(f"{postal} {city}".strip())
         if company_info.get('phone'):
-            company_lines.append(f"Tél : {company_info['phone']}")
+            company_lines.append(f"<b>Tél : {company_info['phone']}</b>")
+        if company_info.get('email'):
+            company_lines.append(company_info['email'])
         
         if company_lines:
             left_content.append(Paragraph("<br/>".join(company_lines), small_style))
@@ -4284,17 +4427,27 @@ async def generate_quote_pdf(
         city_name = company_info.get('city', 'Paris').upper()
         date_str = datetime.now().strftime('%d/%m/%Y')
         right_content.append(Paragraph(f"<b>{city_name}, le {date_str}</b>", bold_style))
-        right_content.append(Spacer(1, 0.3*cm))
+        right_content.append(Spacer(1, 0.2*cm))
         
-        # Numéro de devis en gros
+        # Numéro de devis
         devis_num = Paragraph(f"<b><font size=14>Devis N° {quote.get('quote_number', 'N/A')}</font></b>", 
                              ParagraphStyle('DevisNum', fontSize=14, fontName='Helvetica-Bold', alignment=TA_LEFT))
         right_content.append(devis_num)
-        right_content.append(Spacer(1, 0.5*cm))
+        right_content.append(Spacer(1, 0.3*cm))
         
-        # Section CLIENT
-        right_content.append(Paragraph("<b>CLIENT</b>", bold_style))
-        right_content.append(Spacer(1, 0.1*cm))
+        # Section CLIENT - badge compact
+        client_badge = Table([[Paragraph("<b>CLIENT</b>", ParagraphStyle('CB', fontSize=9, textColor=colors.white, fontName='Helvetica-Bold'))]], 
+                            colWidths=[2.5*cm])
+        client_badge.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), colors.black),
+            ('TOPPADDING', (0, 0), (-1, -1), 3),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ('LEFTPADDING', (0, 0), (-1, -1), 6),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ]))
+        right_content.append(client_badge)
+        right_content.append(Spacer(1, 0.15*cm))
         
         # Récupérer les infos du client
         client_lines = []
@@ -4333,7 +4486,7 @@ async def generate_quote_pdf(
             right_content.append(Paragraph("<br/>".join(client_lines), small_style))
         
         # Créer le tableau header avec 2 colonnes
-        header_table = Table([[left_content, right_content]], colWidths=[9*cm, 8*cm])
+        header_table = Table([[left_content, right_content]], colWidths=[9*cm, 9*cm])
         header_table.setStyle(TableStyle([
             ('VALIGN', (0, 0), (-1, -1), 'TOP'),
             ('ALIGN', (0, 0), (0, 0), 'LEFT'),
@@ -4345,15 +4498,15 @@ async def generate_quote_pdf(
         ]))
         
         story.append(header_table)
-        story.append(Spacer(1, 0.8*cm))
+        story.append(Spacer(1, 0.3*cm))
         
         # ==== LIGNE DE SÉPARATION ====
-        line_table = Table([['']], colWidths=[17*cm])
+        line_table = Table([['']], colWidths=[18*cm])
         line_table.setStyle(TableStyle([
             ('LINEABOVE', (0, 0), (-1, 0), 2, colors.black),
         ]))
         story.append(line_table)
-        story.append(Spacer(1, 0.5*cm))
+        story.append(Spacer(1, 0.2*cm))
         
         # ==== AFFAIRE SUIVIE PAR ====
         if company_info.get('contact_name') or company_info.get('contact_phone'):
@@ -4363,41 +4516,60 @@ async def generate_quote_pdf(
             if company_info.get('contact_phone'):
                 affaire_text += f" - Tél : {company_info['contact_phone']}"
             story.append(Paragraph(affaire_text, normal_style))
-            story.append(Spacer(1, 0.3*cm))
+            story.append(Spacer(1, 0.15*cm))
         
-        # ==== ADRESSE DES TRAVAUX ====
+        # ==== ADRESSE DES TRAVAUX - badge compact ====
         if quote.get('worksite_address'):
-            story.append(Paragraph("<b>ADRESSE DES TRAVAUX</b>", bold_style))
+            addr_badge = Table([[Paragraph("<b>ADRESSE DES TRAVAUX</b>", ParagraphStyle('AB', fontSize=8, textColor=colors.white, fontName='Helvetica-Bold'))]], 
+                              colWidths=[5*cm])
+            addr_badge.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, -1), colors.black),
+                ('TOPPADDING', (0, 0), (-1, -1), 3),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+                ('LEFTPADDING', (0, 0), (-1, -1), 6),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+            ]))
+            story.append(addr_badge)
             story.append(Spacer(1, 0.1*cm))
             story.append(Paragraph(quote['worksite_address'], normal_style))
-            story.append(Spacer(1, 0.3*cm))
+            story.append(Spacer(1, 0.2*cm))
         
-        # ==== OBJET DES TRAVAUX ====
+        # ==== OBJET DES TRAVAUX - badge compact ====
         if quote.get('title') or quote.get('description'):
-            story.append(Paragraph("<b>OBJET DES TRAVAUX</b>", bold_style))
+            obj_badge = Table([[Paragraph("<b>OBJET DES TRAVAUX</b>", ParagraphStyle('OB', fontSize=8, textColor=colors.white, fontName='Helvetica-Bold'))]], 
+                             colWidths=[5*cm])
+            obj_badge.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, -1), colors.black),
+                ('TOPPADDING', (0, 0), (-1, -1), 3),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+                ('LEFTPADDING', (0, 0), (-1, -1), 6),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+            ]))
+            story.append(obj_badge)
             story.append(Spacer(1, 0.1*cm))
             if quote.get('title'):
-                story.append(Paragraph(f"<b>{quote['title']}</b>", normal_style))
+                title_style = ParagraphStyle('WorkTitle', fontSize=9, textColor=colors.black, fontName='Helvetica-Bold')
+                story.append(Paragraph(quote['title'], title_style))
             if quote.get('description'):
-                story.append(Spacer(1, 0.1*cm))
                 story.append(Paragraph(quote['description'], normal_style))
-            story.append(Spacer(1, 0.5*cm))
+            story.append(Spacer(1, 0.25*cm))
         
-        items = quote.get('items', [])
+        # Items déjà normalisé au début de la fonction
         if items:
             total_ht = 0
             total_tva = 0
             
-            # En-tête du tableau principal
+            # En-tête du tableau principal avec couleurs professionnelles
+            header_style = ParagraphStyle('TableHeader', fontSize=9, textColor=colors.white, fontName='Helvetica-Bold', alignment=TA_CENTER)
             table_data = [
                 [
-                    Paragraph("<b>N°</b>", bold_style),
-                    Paragraph("<b>Désignation</b>", bold_style),
-                    Paragraph("<b>Unité</b>", bold_style),
-                    Paragraph("<b>Quantité</b>", bold_style),
-                    Paragraph("<b>Prix HT</b>", bold_style),
-                    Paragraph("<b>TVA</b>", bold_style),
-                    Paragraph("<b>Total HT</b>", bold_style)
+                    Paragraph("<b>N°</b>", header_style),
+                    Paragraph("<b>Désignation</b>", header_style),
+                    Paragraph("<b>Unité</b>", header_style),
+                    Paragraph("<b>Quantité</b>", header_style),
+                    Paragraph("<b>Prix HT</b>", header_style),
+                    Paragraph("<b>TVA</b>", header_style),
+                    Paragraph("<b>Total HT</b>", header_style)
                 ]
             ]
             
@@ -4458,63 +4630,83 @@ async def generate_quote_pdf(
                     except Exception as e:
                         logging.error(f"Erreur ajout photo dans tableau: {e}")
             
-            # Créer le tableau avec les nouvelles largeurs
+            # Créer le tableau avec les nouvelles largeurs et style professionnel
             main_table = Table(table_data, colWidths=[1*cm, 7*cm, 1.5*cm, 1.5*cm, 2*cm, 1.5*cm, 2.5*cm])
             main_table.setStyle(TableStyle([
-                ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cccccc')),
+                ('LINEBELOW', (0, 0), (-1, 0), 2, colors.black),
                 ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('BACKGROUND', (0, 0), (-1, 0), colors.black),
                 ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-                ('ALIGN', (0, 0), (0, -1), 'CENTER'),  # Colonne N° centrée
-                ('ALIGN', (2, 0), (6, -1), 'CENTER'),  # Colonnes Unité, Quantité, Prix HT, TVA, Total HT centrées
+                ('ALIGN', (0, 0), (0, -1), 'CENTER'),
+                ('ALIGN', (2, 0), (6, -1), 'CENTER'),
                 ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                ('FONTSIZE', (0, 0), (-1, -1), 9),
-                ('TOPPADDING', (0, 0), (-1, -1), 5),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
-                ('LEFTPADDING', (0, 0), (-1, -1), 5),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+                ('FONTSIZE', (0, 0), (-1, -1), 8),
+                ('TOPPADDING', (0, 0), (-1, -1), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                ('LEFTPADDING', (0, 0), (-1, -1), 3),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 3),
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#f5f5f5')]),
             ]))
             
             story.append(main_table)
-            story.append(Spacer(1, 0.5*cm))
+            story.append(Spacer(1, 0.3*cm))
             
             # ==== TOTAUX À DROITE AVEC ENCADRÉ ====
             total_ttc = total_ht + total_tva
             
-            # Créer un tableau pour les montants (style professionnel)
+            # Calculer le pourcentage de TVA (éviter division par zéro)
+            tva_percentage = (total_tva/total_ht*100) if total_ht > 0 else 0
+            
+            # Créer un tableau pour les montants (compact)
+            totals_header_style = ParagraphStyle('TotalsHeader', fontSize=8, textColor=colors.white, 
+                                                 fontName='Helvetica-Bold', alignment=TA_CENTER)
+            totals_left_style = ParagraphStyle('TotalsLeft', fontSize=9, leading=13, 
+                                              fontName='Helvetica', textColor=dark_gray)
+            totals_right_style = ParagraphStyle('TotalsRight', fontSize=9, leading=13, 
+                                               fontName='Helvetica', alignment=TA_RIGHT, textColor=dark_gray)
+            totals_ttc_style = ParagraphStyle('TotalsTTC', fontSize=11, leading=13, 
+                                             fontName='Helvetica-Bold', alignment=TA_RIGHT, textColor=colors.black)
+            
             totals_data = [
-                [Paragraph("<b>Montants en Euros</b>", bold_style)],
-                [Paragraph(f"Total H.T.<br/>Total T.V.A. {total_tva/total_ht*100:.0f}%<br/><b>Total T.T.C.</b>", 
-                          ParagraphStyle('TotalsLeft', fontSize=9, leading=14, fontName='Helvetica'))],
+                [Paragraph("MONTANTS EN EUROS", totals_header_style)],
+                [Paragraph(f"Total H.T.<br/>Total T.V.A. {tva_percentage:.0f}%", totals_left_style)],
+                [Paragraph(f"<b>TOTAL T.T.C.</b>", ParagraphStyle('TTCLabel', fontSize=11, fontName='Helvetica-Bold', textColor=colors.black))],
             ]
             
             amounts_data = [
                 [''],
-                [Paragraph(f"{total_ht:.2f}<br/>{total_tva:.2f}<br/><b>{total_ttc:.2f}</b>", 
-                          ParagraphStyle('TotalsRight', fontSize=9, leading=14, fontName='Helvetica', alignment=TA_RIGHT))],
+                [Paragraph(f"{total_ht:.2f} €<br/>{total_tva:.2f} €", totals_right_style)],
+                [Paragraph(f"<b>{total_ttc:.2f} €</b>", totals_ttc_style)],
             ]
             
             # Tableau de gauche (labels)
             totals_left = Table(totals_data, colWidths=[6*cm])
             totals_left.setStyle(TableStyle([
-                ('GRID', (0, 0), (-1, -1), 1, colors.black),
-                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-                ('TOPPADDING', (0, 0), (-1, -1), 5),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
-                ('LEFTPADDING', (0, 0), (-1, -1), 5),
+                ('BOX', (0, 0), (-1, -1), 1.5, colors.black),
+                ('BACKGROUND', (0, 0), (-1, 0), colors.black),
+                ('BACKGROUND', (0, 2), (-1, 2), colors.HexColor('#eeeeee')),  # Fond jaune clair pour TTC
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                ('TOPPADDING', (0, 0), (-1, 0), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 4),
+                ('TOPPADDING', (0, 1), (-1, -1), 5),
+                ('BOTTOMPADDING', (0, 1), (-1, -1), 5),
+                ('LEFTPADDING', (0, 0), (-1, -1), 8),
             ]))
             
             # Tableau de droite (montants)
             totals_right = Table(amounts_data, colWidths=[5*cm])
             totals_right.setStyle(TableStyle([
-                ('GRID', (0, 0), (-1, -1), 1, colors.black),
-                ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
-                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('BOX', (0, 0), (-1, -1), 1.5, colors.black),
+                ('BACKGROUND', (0, 0), (-1, 0), colors.black),
+                ('BACKGROUND', (0, 2), (-1, 2), colors.HexColor('#eeeeee')),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
                 ('ALIGN', (0, 0), (-1, -1), 'RIGHT'),
-                ('TOPPADDING', (0, 0), (-1, -1), 5),
-                ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
-                ('RIGHTPADDING', (0, 0), (-1, -1), 5),
+                ('TOPPADDING', (0, 0), (-1, 0), 4),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 4),
+                ('TOPPADDING', (0, 1), (-1, -1), 5),
+                ('BOTTOMPADDING', (0, 1), (-1, -1), 5),
+                ('RIGHTPADDING', (0, 0), (-1, -1), 8),
             ]))
             
             # Assembler les deux tableaux côte à côte, alignés à droite
@@ -4526,89 +4718,18 @@ async def generate_quote_pdf(
             
             story.append(combined_totals)
         
-        story.append(Spacer(1, 0.8*cm))
+        story.append(Spacer(1, 0.3*cm))
         
-        # ==== MODALITÉS DE RÈGLEMENT ====
+        # ==== MODALITÉS DE RÈGLEMENT (compact) ====
         modalities_text = []
         modalities_text.append("<b>MODALITÉS DE RÈGLEMENT</b>")
-        modalities_text.append("TVA AUTOLIQUIDATION : Article 283-2 du CGI")
-        modalities_text.append(f"<b>Devis valable 30 JOURS</b>")
-        modalities_text.append("Paiement escompte anticipé : 0%")
-        modalities_text.append("Nos prix sont établis sur la base des taux de T.V.A. en vigueur à la date de remise de l'offre. Toute variation de ces taux, imposés par la loi, sera répercutée sur ces prix.")
+        modalities_text.append("TVA AUTOLIQUIDATION : Article 283-2 du CGI | <b>Devis valable 30 JOURS</b> | Escompte anticipé : 0%")
         
-        modalities_para = Paragraph("<br/>".join(modalities_text), small_style)
+        modalities_style = ParagraphStyle('Modalities', fontSize=7, textColor=dark_gray, leading=10)
+        modalities_para = Paragraph("<br/>".join(modalities_text), modalities_style)
         story.append(modalities_para)
         
-        story.append(Spacer(1, 1*cm))
-        
-        # ==== SIGNATURES ====
-        signature_data = [
-            [
-                Paragraph("<b>Bon pour accord</b><br/>(Date, Cachet, Nom, Signature)", small_style),
-                Paragraph(f"<b>Signature du chargé d'affaire</b>", small_style)
-            ],
-            ['', ''],  # Espace pour les signatures
-            ['', ''],
-        ]
-        
-        signature_table = Table(signature_data, colWidths=[8.5*cm, 8.5*cm], rowHeights=[None, 2*cm, 0.5*cm])
-        signature_table.setStyle(TableStyle([
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('LINEBELOW', (0, 2), (-1, 2), 1, colors.black),
-        ]))
-        
-        story.append(signature_table)
-        
-        story.append(Spacer(1, 0.5*cm))
-        
-        # ==== PIED DE PAGE - Coordonnées entreprise ====
-        footer_lines = []
-        if company_info.get('company_name'):
-            footer_lines.append(f"<b>{company_info['company_name']}</b>")
-        
-        footer_parts = []
-        if company_info.get('address'):
-            footer_parts.append(company_info['address'])
-        if company_info.get('phone'):
-            footer_parts.append(f"Tél : {company_info['phone']}")
-        if company_info.get('email'):
-            footer_parts.append(company_info['email'])
-        
-        if footer_parts:
-            footer_lines.append(" - ".join(footer_parts))
-        
-        # Ajouter les informations légales
-        legal_parts = []
-        if company_info.get('legal_form'):
-            legal_parts.append(company_info['legal_form'])
-        if company_info.get('siret'):
-            legal_parts.append(f"Siret : {company_info['siret']}")
-        if company_info.get('rcs_rm'):
-            legal_parts.append(company_info['rcs_rm'])
-        if company_info.get('tva_number'):
-            legal_parts.append(f"N° TVA : {company_info['tva_number']}")
-        
-        if legal_parts:
-            footer_lines.append(" - ".join(legal_parts))
-        
-        footer_para = Paragraph("<br/>".join(footer_lines), 
-                               ParagraphStyle('Footer', fontSize=7, alignment=TA_CENTER, leading=9))
-        
-        story.append(footer_para)
-        
-        story.append(Spacer(1, 1*cm))
-        
-        # ==== PIED DE PAGE ====
-        footer_style = ParagraphStyle('Footer', parent=styles['Normal'],
-                                     fontSize=7, textColor=colors.HexColor("#9ca3af"),
-                                     leading=9, alignment=1)  # Centré
-        
-        footer_text = f"Document émis le {datetime.now().strftime('%d/%m/%Y à %H:%M')}"
-        
-        footer = Paragraph(footer_text, footer_style)
-        story.append(footer)
-        
-        # Construire le PDF
+        # Construire le PDF (signatures + pied de page dessinés par add_page_number)
         doc.build(story, onFirstPage=add_page_number, onLaterPages=add_page_number)
         
         buffer.seek(0)
@@ -4624,7 +4745,10 @@ async def generate_quote_pdf(
     except HTTPException:
         raise
     except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc()
         logging.error(f"Erreur génération PDF devis: {e}")
+        logging.error(f"Traceback complet:\n{error_detail}")
         raise HTTPException(status_code=500, detail=f"Erreur lors de la génération du PDF: {str(e)}")
 
 
@@ -5382,9 +5506,12 @@ async def get_schedules(user_data: dict = Depends(get_user_from_token)):
         # Retourner un tableau vide au lieu d'une erreur 500
         return []
 
-@api_router.post("/schedules")
-async def create_schedule(schedule_data: dict, user_data: dict = Depends(get_user_from_token)):
-    """Créer un nouveau planning (ADMIN/BUREAU uniquement)"""
+# ANCIENNE VERSION - DÉSACTIVÉE (conflit avec nouvelle version ligne 7185)
+# @api_router.post("/schedules")
+# async def create_schedule_old(schedule_data: dict, user_data: dict = Depends(get_user_from_token)):
+#     """Créer un nouveau planning (ADMIN/BUREAU uniquement)"""
+async def create_schedule_old_disabled(schedule_data: dict, user_data: dict):
+    """DÉSACTIVÉ - Ancienne version de create_schedule"""
     try:
         # Vérifier que l'utilisateur est ADMIN ou BUREAU
         user_role = user_data.get('role')
@@ -7043,19 +7170,24 @@ async def verify_archive_integrity(archive_id: str, user_data: dict = Depends(ge
 # =============================================================================
 
 class ScheduleCreate(BaseModel):
-    worksite_id: str
+    worksite_id: Optional[str] = None
     team_leader_id: Optional[str] = None
     collaborator_id: str  # Technicien assigné
-    date: date
+    date: Optional[str] = None  # Date unique "YYYY-MM-DD" (ancien comportement)
+    period_start: Optional[str] = None  # Date de début "YYYY-MM-DD" (nouveau)
+    period_end: Optional[str] = None  # Date de fin "YYYY-MM-DD" (nouveau)
     time: str  # Format "HH:MM"
     end_time: Optional[str] = None  # Format "HH:MM"
     hours: Optional[int] = 8
     shift: Optional[str] = "day"
     description: Optional[str] = ""
     status: Optional[str] = "scheduled"
+    client_name: Optional[str] = None
+    client_address: Optional[str] = None
+    intervention_category: Optional[str] = "worksite"  # 'worksite', 'rdv', 'urgence'
 
 class ScheduleUpdate(BaseModel):
-    date: Optional[date] = None
+    date: Optional[str] = None
     time: Optional[str] = None
     end_time: Optional[str] = None
     hours: Optional[int] = None
@@ -7149,40 +7281,120 @@ async def list_schedules(
 @api_router.post("/schedules")
 async def create_schedule(payload: ScheduleCreate, user=Depends(get_user_from_token)):
     """Créer un planning. Bureau/Admin uniquement. Détecte les conflits."""
-    _ensure_bureau_or_admin(user)
-    company_id = user.get("company_id")
-    
-    # Calculer end_time si absent
-    time_start = payload.time
-    time_end = payload.end_time
-    if not time_end:
-        # Calculer à partir de time + hours
-        from datetime import datetime as dt, timedelta
-        t = dt.strptime(time_start, "%H:%M")
-        t_end = t + timedelta(hours=payload.hours or 8)
-        time_end = t_end.strftime("%H:%M")
-    
-    # Vérifier conflits
-    if _check_schedule_overlap(company_id, payload.collaborator_id, payload.date, time_start, time_end):
-        raise HTTPException(status_code=409, detail="Conflit de planning pour ce technicien")
-    
-    data = {
-        "company_id": company_id,
-        "worksite_id": payload.worksite_id,
-        "team_leader_id": payload.team_leader_id,
-        "collaborator_id": payload.collaborator_id,
-        "date": payload.date.isoformat(),
-        "time": time_start,
-        "end_time": time_end,
-        "hours": payload.hours or 8,
-        "shift": payload.shift or "day",
-        "description": payload.description or "",
-        "status": payload.status or "scheduled",
-        "created_by": user.get("id"),
-    }
-    
-    res = _svc().table("schedules").insert(data).execute()
-    return res.data[0]
+    try:
+        logging.info(f"📅 Création schedule - User: {user.get('email')}, Company: {user.get('company_id')}")
+        _ensure_bureau_or_admin(user)
+        company_id = user.get("company_id")
+        
+        if not company_id:
+            raise HTTPException(status_code=400, detail="Vous devez appartenir à une entreprise")
+        
+        # Validation: soit date, soit period_start+period_end
+        if not payload.date and not (payload.period_start and payload.period_end):
+            raise HTTPException(status_code=400, detail="Spécifier 'date' ou 'period_start'+'period_end'")
+        
+        # Calculer end_time si absent
+        time_start = payload.time
+        time_end = payload.end_time
+        if not time_end:
+            from datetime import datetime as dt, timedelta
+            t = dt.strptime(time_start, "%H:%M")
+            t_end = t + timedelta(hours=payload.hours or 8)
+            time_end = t_end.strftime("%H:%M")
+        
+        # Vérifier conflits (seulement pour date unique)
+        if payload.date and _check_schedule_overlap(company_id, payload.collaborator_id, payload.date, time_start, time_end):
+            raise HTTPException(status_code=409, detail="Conflit de planning pour ce technicien")
+        
+        # Récupérer le nom/prénom du collaborateur depuis la table users
+        collab_first_name = None
+        collab_last_name = None
+        try:
+            collab_res = _svc().table("users").select("first_name, last_name").eq("id", payload.collaborator_id).execute()
+            if collab_res.data:
+                collab_first_name = collab_res.data[0].get("first_name", "")
+                collab_last_name = collab_res.data[0].get("last_name", "")
+                logging.info(f"👤 Collaborateur: {collab_first_name} {collab_last_name}")
+        except Exception as e:
+            logging.warning(f"⚠️ Impossible de récupérer le nom du collaborateur: {e}")
+
+        # Récupérer les infos du chantier et du client si worksite_id fourni
+        worksite_title = None
+        resolved_client_name = payload.client_name
+        resolved_client_address = payload.client_address
+        if payload.worksite_id:
+            try:
+                ws_res = _svc().table("worksites").select(
+                    "title, address, client_id, clients:client_id(name, prenom, nom, adresse, email, telephone)"
+                ).eq("id", payload.worksite_id).execute()
+                if ws_res.data:
+                    ws = ws_res.data[0]
+                    worksite_title = ws.get("title")
+                    logging.info(f"🏗️ Chantier: {worksite_title}")
+                    # Récupérer adresse du chantier si pas fournie
+                    if not resolved_client_address and ws.get("address"):
+                        resolved_client_address = ws["address"]
+                    # Récupérer infos client depuis la relation
+                    client_data = ws.get("clients")
+                    if client_data and not resolved_client_name:
+                        if client_data.get("name"):
+                            resolved_client_name = client_data["name"]
+                        elif client_data.get("prenom") or client_data.get("nom"):
+                            resolved_client_name = f"{client_data.get('prenom', '')} {client_data.get('nom', '')}".strip()
+                        if not resolved_client_address and client_data.get("adresse"):
+                            resolved_client_address = client_data["adresse"]
+                        logging.info(f"👤 Client: {resolved_client_name} - {resolved_client_address}")
+            except Exception as e:
+                logging.warning(f"⚠️ Impossible de récupérer les infos du chantier: {e}")
+
+        data = {
+            "company_id": company_id,
+            "worksite_id": payload.worksite_id,
+            "team_leader_id": payload.team_leader_id,
+            "collaborator_id": payload.collaborator_id,
+            "collaborator_first_name": collab_first_name,
+            "collaborator_last_name": collab_last_name,
+            "worksite_title": worksite_title,
+            "time": time_start,
+            "end_time": time_end,
+            "hours": payload.hours or 8,
+            "shift": payload.shift or "day",
+            "description": payload.description or "",
+            "status": payload.status or "scheduled",
+            "created_by": user.get("id"),
+            "client_name": resolved_client_name,
+            "client_address": resolved_client_address,
+            "intervention_category": payload.intervention_category or "worksite",
+        }
+        
+        # Selon le mode: date unique ou période
+        if payload.date:
+            data["date"] = str(payload.date)
+            # Pour compatibilité, remplir aussi start_date/end_date
+            data["start_date"] = str(payload.date)
+            data["end_date"] = str(payload.date)
+        else:
+            # Utiliser start_date/end_date pour compatibilité (au lieu de period_start/period_end)
+            data["start_date"] = str(payload.period_start)
+            data["end_date"] = str(payload.period_end)
+            # Garder aussi period_start/period_end si les colonnes existent
+            try:
+                data["period_start"] = str(payload.period_start)
+                data["period_end"] = str(payload.period_end)
+            except:
+                pass
+        
+        logging.info(f"📝 Insertion schedule: {data}")
+        res = _svc().table("schedules").insert(data).execute()
+        logging.info(f"✅ Schedule créé: {res.data}")
+        return res.data[0]
+    except HTTPException:
+        raise
+    except Exception as e:
+        logging.error(f"❌ Erreur création schedule: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Erreur: {str(e)}")
 
 @api_router.patch("/schedules/{schedule_id}")
 async def update_schedule(schedule_id: str, payload: ScheduleUpdate, user=Depends(get_user_from_token)):
@@ -7715,6 +7927,8 @@ class CompanySettingsModel(BaseModel):
     siret: str
     siren: str
     rcs_rm: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
     logo_url: Optional[str] = None
     primary_color: Optional[str] = '#6366f1'
     secondary_color: Optional[str] = '#333333'
@@ -7762,7 +7976,7 @@ async def save_company_settings(
 ):
     """Enregistrer les paramètres de l'entreprise (admin uniquement)"""
     try:
-        require_role(user_data, ["ADMIN", "BUREAU"])
+        require_role(user_data, ["ADMIN"])
         company_id = await get_user_company(user_data)
         
         if not company_id:
@@ -8119,24 +8333,31 @@ uploads_dir.mkdir(exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=str(uploads_dir)), name="uploads")
 
 # CORS (production: utiliser la variable d'env ALLOWED_ORIGINS, ex: https://app.tondomaine.com,https://preview.vercel.app)
-allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "*")
-# Toujours inclure les domaines de production
+allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "")
+# Origines de développement local
+_dev_origins = [
+    "http://localhost:3000",
+    "http://localhost:3002",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3002",
+]
+# Origines de production
 _production_origins = [
     "https://skyapp.fr",
     "https://www.skyapp.fr",
     "https://skyapp-frontend.onrender.com",
 ]
-if allowed_origins_env.strip() in ("", "*"):
+
+# Construire la liste des origines autorisées
+if allowed_origins_env.strip() == "*":
+    # En mode développement avec *, autoriser tout
     _allow_origins = ["*"]
-else:
+elif allowed_origins_env.strip():
+    # Utiliser les origines spécifiées dans la variable d'environnement
     _allow_origins = [o.strip() for o in allowed_origins_env.split(",") if o.strip()]
-# Fusionner avec les origines de production
-for origin in _production_origins:
-    if origin not in _allow_origins:
-        _allow_origins.append(origin)
-# Si "*" est dans la liste avec d'autres origines, garder seulement les origines explicites
-if "*" in _allow_origins and len(_allow_origins) > 1:
-    _allow_origins = [o for o in _allow_origins if o != "*"]
+else:
+    # Par défaut, autoriser dev + production
+    _allow_origins = _dev_origins + _production_origins
 
 app.add_middleware(
     CORSMiddleware,
